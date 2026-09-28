@@ -1,0 +1,28 @@
+"""
+Шаблон config.py. Скопируйте в config.py и заполните реальными значениями -
+config.py в git не попадает (см. .gitignore), поэтому при git pull он
+никогда не будет перезаписан.
+"""
+
+BOT_TOKEN = "токен от @BotFather"
+
+OWNER_ID = [111111111, 222222222]
+
+DB_PATH = "adbot.db"
+CONTENT_DB_PATH = "content.db"
+
+KEY_PREFIX = "CRUISE"
+MAX_SUPER_ADMINS = 3
+MAX_BROADCASTS_PER_KEY = 3
+MAX_KEY_ADMINS = 2
+ALLOWED_INTERVALS_HOURS = (1, 2)
+SEND_DELAY_SECONDS = 0.8
+SCHEDULER_TICK_SECONDS = 30
+DISPLAY_TZ = "Asia/Almaty"
+DISPLAY_TZ_LABEL = "Алматы"
+
+# Канал-хранилище постов (см. handlers_user._store_post) - приватный канал,
+# бот должен быть в нём админом. Позволяет постам переживать смену бота/
+# токена без повторной отправки. Можно не задавать - тогда работает
+# по-старому (ссылка на пост в ЛС, ломается при смене бота).
+# STORAGE_CHAT_ID = -1000000000000
