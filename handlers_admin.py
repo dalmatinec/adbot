@@ -10,7 +10,7 @@ import re
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 
 from aiogram.types import FSInputFile
@@ -468,13 +468,32 @@ async def cb_adm_user_preview(call: CallbackQuery, bot: Bot) -> None:
     if not broadcast or not broadcast["source_message_id"]:
         return await call.answer("Пост этой рассылки не найден (возможно, рассылка удалена).", show_alert=True)
     try:
-        await bot.forward_message(
+        # copy_message, а не forward_message - визуально то же самое (для
+        # проверки контента разница не важна), но, в отличие от форварда,
+        # поддерживает reply_markup: можно повесить кнопку "Закрыть", чтобы
+        # превью не зависало в чате навсегда после возврата в меню.
+        await bot.copy_message(
             chat_id=call.message.chat.id,
             from_chat_id=broadcast["source_chat_id"],
             message_id=broadcast["source_message_id"],
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🗑 Закрыть", callback_data="adm_close_msg")],
+            ]),
         )
     except Exception:
-        return await call.answer("Не удалось переслать пост - возможно, исходное сообщение удалено.", show_alert=True)
+        return await call.answer("Не удалось скопировать пост - возможно, исходное сообщение удалено.", show_alert=True)
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm_close_msg")
+async def cb_adm_close_msg(call: CallbackQuery) -> None:
+    """Общая кнопка "Закрыть" под сообщениями, которые бот не может
+    редактировать кнопками меню (превью поста и т.п. - отдельные сообщения,
+    а не то, что открыто через edit_text)."""
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
     await call.answer()
 
 
