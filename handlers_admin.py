@@ -18,6 +18,7 @@ import applications
 import backup
 import config
 import db
+import texts
 from ui import STATUS_ICON, STATUS_TEXT, esc, fmt_dt, fmt_interval, kb, show, user_link
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ class AdminStates(StatesGroup):
     user_search = State()
     add_owner = State()
     stopwords = State()
+    desc_full = State()
+    desc_short = State()
     bc_wait = State()             # data: audience
     bc_confirm = State()
     newmain = State()
@@ -157,7 +160,7 @@ async def group_interval(call: CallbackQuery) -> None:
     rows.append([("Общий", f"a:gip:{gid}:0"), ("✏️ Свой", f"a:gic:{gid}")])
     rows.append([("⬅️ Назад", f"a:g:{gid}")])
     await show(call, f"⏱ Интервал группы (минимум {config.MIN_INTERVAL_MINUTES} мин.).\n"
-                     "«Общий» берёт значение из настроек.", kb(rows))
+                     "Вариант Общий использует значение из настроек.", kb(rows))
 
 
 @router.callback_query(F.data.startswith("a:gip:"))
@@ -232,7 +235,7 @@ async def group_add_msg(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
     gid = await db.add_group(chat_id, chat.title, active=True)
     warn = "" if member.status == "administrator" else "\n⚠️ Бот не админ, писать он, возможно, не сможет."
-    await message.answer(f"✅ Группа «{esc(chat.title)}» добавлена и включена.{warn}",
+    await message.answer(f"Группа <b>{esc(chat.title)}</b> добавлена и включена.{warn}",
                          reply_markup=kb([[("К группе", f"a:g:{gid}")]]))
 
 
@@ -378,7 +381,7 @@ async def mirror_block(call: CallbackQuery, manager) -> None:
         return
     mid = int(call.data.split(":")[2])
     await db.set_mirror_status(mid, "blocked")
-    await manager.notify_staff(mid, "⛔ Доступ к рассылке ограничен владельцами сети.")
+    await manager.notify_staff(mid, "Доступ к рассылке ограничен владельцами сети.")
     await _mirror_card(call, mid, role)
 
 
@@ -415,11 +418,11 @@ async def moderate(call: CallbackQuery, manager) -> None:
         return
     if action == "ok":
         await db.set_post_status(post["id"], "active")
-        await manager.notify_staff(post["mirror_id"], f"✅ Пост «{post['title']}» одобрен, рассылка запущена.")
+        await manager.notify_staff(post["mirror_id"], f"Пост {esc(post['title'])} одобрен, рассылка запущена.")
         await show(call, f"✅ Пост #{pid} одобрен.")
     else:
         await db.delete_post(post["id"])
-        await manager.notify_staff(post["mirror_id"], f"❌ Пост «{post['title']}» отклонён.")
+        await manager.notify_staff(post["mirror_id"], f"Пост {esc(post['title'])} отклонён.")
         await show(call, f"❌ Пост #{pid} отклонён и удалён.")
 
 
@@ -439,9 +442,9 @@ async def _user_card(target, uid: int) -> None:
     mirror = await db.mirror_for_staff(uid)
     banned = bool(u and u["is_banned"])
     text = (f"👤 {user_link(uid, u['full_name'] if u else None)}\n"
-            f"ID: <code>{uid}</code>\nUsername: @{esc(u['username']) if u else '—'}\n"
+            f"ID: <code>{uid}</code>\nUsername: @{esc(u['username']) if u else 'нет'}\n"
             f"Статус: {'⛔ в бане' if banned else '✅ активен'}\n"
-            f"Зеркало: {'@' + esc(mirror['username']) if mirror else '—'}")
+            f"Зеркало: {'@' + esc(mirror['username']) if mirror else 'нет'}")
     btn = ("✅ Разбанить", f"a:uu:{uid}") if banned else ("⛔ Забанить", f"a:ub:{uid}")
     await show(target, text, kb([[btn], [("⬅️ Назад", "a:menu")]]))
 
@@ -474,7 +477,7 @@ async def user_ban(call: CallbackQuery, manager) -> None:
     await db.ban_user(uid)
     mirror = await db.get_mirror_by_owner(uid)
     if mirror:
-        await manager.notify_staff(mirror["id"], "⛔ Доступ к рассылке ограничен владельцами сети.")
+        await manager.notify_staff(mirror["id"], "Доступ к рассылке ограничен владельцами сети.")
     await _user_card(call, uid)
 
 
@@ -519,7 +522,7 @@ async def settings(call: CallbackQuery, state: FSMContext) -> None:
     gi = await db.global_interval()
     mod = await db.moderation_on()
     slots = await db.get_setting("default_slots", str(config.DEFAULT_SLOTS))
-    sw = await db.get_setting("stopwords", "") or "—"
+    sw = await db.get_setting("stopwords", "") or "нет"
     text = (f"⚙️ <b>Настройки</b>\n\nОбщий интервал: {fmt_interval(gi)}\n"
             f"Модерация постов: {'включена' if mod else 'выключена'}\n"
             f"Слотов у новых зеркал: {slots}\nСтоп-слова: {esc(sw)}")
@@ -528,6 +531,7 @@ async def settings(call: CallbackQuery, state: FSMContext) -> None:
         [(f"🛡 Модерация: {'выключить' if mod else 'включить'}", "a:smod")],
         [("🎟 Слоты по умолчанию", "a:ssl")],
         [("🚫 Стоп-слова", "a:sw")],
+        [("📝 Описание зеркал", "a:desc")],
         [("⬅️ Назад", "a:menu")],
     ]))
 
@@ -598,7 +602,7 @@ async def stopwords(call: CallbackQuery, state: FSMContext) -> None:
     if await _need(call, True):
         await state.set_state(AdminStates.stopwords)
         await show(call, "Пришлите стоп-слова через запятую. Посты с ними не принимаются. "
-                         "Знак «-» очищает список.", kb([[("⬅️ Отмена", "a:set")]]))
+                         "Для очистки списка отправьте дефис.", kb([[("⬅️ Отмена", "a:set")]]))
 
 
 @router.message(AdminStates.stopwords)
@@ -609,6 +613,78 @@ async def stopwords_msg(message: Message, state: FSMContext) -> None:
     await state.clear()
     await db.set_setting("stopwords", "" if value == "-" else value)
     await message.answer("✅ Сохранено.", reply_markup=kb([[("К настройкам", "a:set")]]))
+
+
+# ---------- описание зеркал ----------
+
+async def _desc_screen(target) -> None:
+    desc = await db.get_setting("mirror_description", texts.DEFAULT_DESCRIPTION)
+    short = await db.get_setting("mirror_short_description", texts.DEFAULT_SHORT_DESCRIPTION)
+    await show(target, (
+        "<b>Описание зеркал</b>\n\n"
+        f"Описание (видно до нажатия Старт, до 512 символов):\n{esc(desc)}\n\n"
+        f"Краткое описание (профиль бота, до 120 символов):\n{esc(short)}\n\n"
+        "Изменение применяется ко всем зеркалам."), kb([
+        [("Изменить описание", "a:descp")],
+        [("Изменить краткое описание", "a:descs")],
+        [("Вернуть стандартные", "a:descr")],
+        [("⬅️ Назад", "a:set")],
+    ]))
+
+
+@router.callback_query(F.data == "a:desc")
+async def desc_open(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if await _need(call, True):
+        await _desc_screen(call)
+
+
+@router.callback_query(F.data == "a:descp")
+async def desc_edit(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.desc_full)
+        await show(call, "Отправьте новый текст описания (до 512 символов).", kb([[("⬅️ Отмена", "a:desc")]]))
+
+
+@router.callback_query(F.data == "a:descs")
+async def desc_short_edit(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.desc_short)
+        await show(call, "Отправьте новый текст краткого описания (до 120 символов).",
+                   kb([[("⬅️ Отмена", "a:desc")]]))
+
+
+async def _save_desc(message: Message, state: FSMContext, manager, key: str, limit: int) -> None:
+    if not await _need(message, True):
+        return
+    value = (message.text or "").strip()
+    if not value or len(value) > limit:
+        await message.answer(f"Текст должен содержать от 1 до {limit} символов. Сейчас: {len(value)}.")
+        return
+    await state.clear()
+    await db.set_setting(key, value)
+    count = await manager.apply_descriptions_all()
+    await message.answer(f"Сохранено. Обновлено зеркал: {count}.", reply_markup=kb([[("К описанию", "a:desc")]]))
+
+
+@router.message(AdminStates.desc_full)
+async def desc_full_msg(message: Message, state: FSMContext, manager) -> None:
+    await _save_desc(message, state, manager, "mirror_description", 512)
+
+
+@router.message(AdminStates.desc_short)
+async def desc_short_msg(message: Message, state: FSMContext, manager) -> None:
+    await _save_desc(message, state, manager, "mirror_short_description", 120)
+
+
+@router.callback_query(F.data == "a:descr")
+async def desc_reset(call: CallbackQuery, manager) -> None:
+    if not await _need(call, True):
+        return
+    await db.set_setting("mirror_description", texts.DEFAULT_DESCRIPTION)
+    await db.set_setting("mirror_short_description", texts.DEFAULT_SHORT_DESCRIPTION)
+    await manager.apply_descriptions_all()
+    await _desc_screen(call)
 
 
 # ---------- владельцы ----------
@@ -756,7 +832,7 @@ async def new_main_msg(message: Message, state: FSMContext) -> None:
     if not name.lower().endswith("bot") or " " in name:
         await message.answer("Юзернейм бота заканчивается на bot, например @new_ads_bot.")
         return
-    text = (f"⚠️ Основной бот сменился. Новый: @{name}. Откройте его и нажмите /start. "
+    text = (f"Основной бот изменён. Новый основной бот: @{name}. Откройте его и нажмите Старт. "
             "Ваше зеркало и посты сохранены.")
     await state.set_state(AdminStates.bc_confirm)
     await state.update_data(audience="mirrors", chat_id=message.chat.id,

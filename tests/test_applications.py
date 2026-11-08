@@ -54,7 +54,7 @@ async def main() -> None:
         assert "&lt;b&gt;" in text  # имя экранировано
     buttons = [b.callback_data for u, _, m in bot.sent if u == 1 and m for row in m.inline_keyboard for b in row]
     assert buttons == ["a:ap:10", "a:ar:10"]
-    assert "отправлена" in bot.to(10)[0]
+    assert "направлена" in bot.to(10)[0]
 
     # токен в базе только в зашифрованном виде
     app = await db.get_application(10)
@@ -93,7 +93,7 @@ async def main() -> None:
     assert await applications.expire_once(bot) == 1
     assert await db.get_application(12) is None
     assert any("отклонена" in t for t in bot.to(12))
-    assert len(bot.to(1)) == before + 1 and "истекла" in bot.to(1)[-1]
+    assert len(bot.to(1)) == before + 1 and "по истечении срока" in bot.to(1)[-1]
     assert await applications.expire_once(bot) == 0
 
     # свежие заявки не трогаются, бан удаляет заявку

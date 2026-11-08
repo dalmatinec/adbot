@@ -18,6 +18,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import crypto
 import db
 import mirror_cabinet
+import texts
 from middlewares import GuardMiddleware
 
 log = logging.getLogger(__name__)
@@ -46,7 +47,31 @@ class MirrorManager:
         self.bots[mid] = bot
         self._dps[mid] = dp
         self._tasks[mid] = asyncio.create_task(self._run(mid, bot, dp), name=f"mirror-{mid}")
+        asyncio.create_task(self.apply_description(bot))
         log.info("Зеркало #%s запущено", mid)
+
+    async def apply_description(self, bot: Bot) -> None:
+        """Описание бота (видно до нажатия Старт) и краткое описание. Telegram
+        ограничивает частоту смены, поэтому меняем только при расхождении."""
+        desc = await db.get_setting("mirror_description", texts.DEFAULT_DESCRIPTION)
+        short = await db.get_setting("mirror_short_description", texts.DEFAULT_SHORT_DESCRIPTION)
+        try:
+            current = await bot.get_my_description()
+            if (current.description or "") != desc:
+                await bot.set_my_description(description=desc)
+            current_short = await bot.get_my_short_description()
+            if (current_short.short_description or "") != short:
+                await bot.set_my_short_description(short_description=short)
+        except Exception:
+            log.warning("Не удалось обновить описание зеркала", exc_info=True)
+
+    async def apply_descriptions_all(self) -> int:
+        n = 0
+        for bot in list(self.bots.values()):
+            await self.apply_description(bot)
+            n += 1
+            await asyncio.sleep(0.3)
+        return n
 
     async def stop(self, mirror_id: int) -> None:
         dp = self._dps.pop(mirror_id, None)
@@ -90,8 +115,8 @@ class MirrorManager:
                 if mirror:
                     await self._notify_main(
                         mirror["owner_id"],
-                        "⚠️ Токен вашего зеркала отозван, зеркало отключено. "
-                        "Посты сохранены на паузе. Создайте зеркало заново или пришлите новый токен.",
+                        "Токен вашего зеркала отозван, зеркало отключено. "
+                        "Посты сохранены и поставлены на паузу. Создайте зеркало заново или отправьте новый токен.",
                     )
                 log.warning("Зеркало #%s: токен отозван", mirror_id)
                 return

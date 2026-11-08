@@ -69,12 +69,12 @@ async def _stopword_hit(text: str) -> str | None:
 async def ingest(mirror_bot: Bot, main_bot: Bot, message: Message) -> tuple[int, int, str | None, str]:
     """Возвращает (storage_chat_id, storage_message_id, buttons_json, title)."""
     if message.media_group_id:
-        raise IngestError("Альбомы не поддерживаются. Пришли один пост: текст, фото, видео, GIF или файл.")
+        raise IngestError("Альбомы не поддерживаются. Отправьте один пост: текст, фото, видео, GIF или файл.")
 
     text = message.text or message.caption or ""
     hit = await _stopword_hit(text)
     if hit:
-        raise IngestError(f"В посте запрещённое слово: «{hit}».")
+        raise IngestError(f"Пост содержит запрещённое слово: {hit}.")
 
     target = config.STORAGE_CHAT_ID
     try:
@@ -94,9 +94,9 @@ async def ingest(mirror_bot: Bot, main_bot: Bot, message: Message) -> tuple[int,
             elif message.audio:
                 file_id, size, kind = message.audio.file_id, message.audio.file_size, "audio"
             else:
-                raise IngestError("Такой тип сообщения не поддерживается. Нужен текст, фото, видео, GIF или файл.")
+                raise IngestError("Данный тип сообщения не поддерживается. Допустимы текст, фото, видео, GIF и файлы.")
             if size and size > config.MAX_FILE_MB * 1024 * 1024:
-                raise IngestError(f"Файл больше {config.MAX_FILE_MB} МБ, Telegram не позволяет ботам его скачать.")
+                raise IngestError(f"Размер файла превышает {config.MAX_FILE_MB} МБ, Telegram не позволяет ботам загрузить такой файл.")
             buf = await mirror_bot.download(file_id)
             upload = BufferedInputFile(buf.getvalue(), filename=f"{kind}_{message.message_id}")
             send = {
@@ -113,6 +113,6 @@ async def ingest(mirror_bot: Bot, main_bot: Bot, message: Message) -> tuple[int,
     except Exception as exc:
         log.exception("Не удалось сохранить пост в хранилище")
         raise IngestError(
-            "Не удалось принять пост, попробуй ещё раз. Если ошибка повторяется - сообщи владельцам."
+            "Не удалось принять пост. Повторите попытку. Если ошибка повторяется, обратитесь к владельцам."
         ) from exc
     return target, saved.message_id, extract_buttons(message), post_title(message)

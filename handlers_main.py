@@ -44,12 +44,12 @@ async def _home(target: Message | CallbackQuery) -> None:
     mirror = await db.mirror_for_staff(uid)
     rows = []
     if mirror:
-        text = f"🪞 Ваше зеркало: @{esc(mirror['username'])}\nВ нём вы настраиваете рассылку."
+        text = f"Ваше зеркало: @{esc(mirror['username'])}\nНастройка рассылки выполняется в нём."
         if mirror["username"]:
             rows.append([("🪞 Открыть зеркало", f"https://t.me/{mirror['username']}")])
     elif await db.get_application(uid):
-        text = ("📨 Ваша заявка на зеркало на рассмотрении. Ответ придёт сюда, "
-                f"обычно в течение {config.APPLICATION_TTL_HOURS} ч.")
+        text = ("Ваша заявка на зеркало находится на рассмотрении. Ответ будет направлен "
+                f"в этот чат в течение {config.APPLICATION_TTL_HOURS} ч.")
     else:
         text = texts.WELCOME
         rows.append([("🪞 Создать зеркало", "m:create")])
@@ -117,9 +117,9 @@ async def register_managed_bot(bot: Bot, mb: dict) -> None:
     except tg_raw.TgError as exc:
         log.error("Не удалось получить токен зеркала %s: %s", bot_id, exc)
         await _safe_send(bot, owner_id,
-                         "Бот создан, но подключить его автоматически не получилось. "
-                         "Нажмите «Подключить своего бота» и пришлите его токен из @BotFather.")
-        await notify_owners(bot, f"⚠️ Ошибка подключения зеркала {bot_id} пользователя {owner_id}: {esc(exc)}")
+                         "Бот создан, но автоматическое подключение не удалось. "
+                         "Нажмите Подключить своего бота и отправьте токен из @BotFather.")
+        await notify_owners(bot, f"Ошибка подключения зеркала {bot_id} пользователя {owner_id}: {esc(exc)}")
         return
     full_name = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or None
     await _submit(bot, owner_id, me, token, "quick",
@@ -127,7 +127,7 @@ async def register_managed_bot(bot: Bot, mb: dict) -> None:
 
 
 _SUBMIT_ERRORS = {
-    "has_mirror": "У вас уже есть зеркало. Один пользователь - одно зеркало.",
+    "has_mirror": "У вас уже есть зеркало. Допускается одно зеркало на пользователя.",
     "has_app": "Ваша заявка уже на рассмотрении.",
     "bot_taken": "Этот бот уже подключён или ожидает рассмотрения.",
 }
@@ -186,16 +186,16 @@ async def token_received(message: Message, state: FSMContext, bot: Bot) -> None:
     except Exception:
         pass
     if not TOKEN_RE.match(raw):
-        await message.answer("Это не похоже на токен. Он выглядит как <code>123456789:AA…</code>. "
-                             "Пришлите ещё раз или /cancel.")
+        await message.answer("Введённые данные не похожи на токен. Токен имеет вид <code>123456789:AA...</code>. "
+                             "Отправьте токен повторно или /cancel.")
         return
     try:
         me = await tg_raw.get_me(raw)
     except tg_raw.TgError:
-        await message.answer("Telegram не принял этот токен. Проверьте его и пришлите заново.")
+        await message.answer("Telegram не принял токен. Проверьте его и отправьте повторно.")
         return
     if me["id"] == bot.id:
-        await message.answer("Это токен основного бота, нужен токен отдельного бота.")
+        await message.answer("Указан токен основного бота. Требуется токен отдельного бота.")
         return
     await state.clear()
     await _submit(bot, message.from_user.id, me, raw, "token",
@@ -213,12 +213,12 @@ async def on_my_member(event: ChatMemberUpdated, bot: Bot) -> None:
         group = await db.get_group_by_chat(chat.id)
         await db.add_group(chat.id, chat.title)
         if group is None:
-            warn = "" if status == "administrator" else "\n⚠️ Бот не админ: без прав писать в чат он не сможет."
+            warn = "" if status == "administrator" else "\nБот не является администратором, отправка сообщений может быть недоступна."
             await notify_owners(
-                bot, f"➕ Бот добавлен в «{esc(chat.title)}» ({chat.id}).{warn}\n"
-                     "Включите группу: /adm → Группы.")
+                bot, f"Бот добавлен в группу <b>{esc(chat.title)}</b> ({chat.id}).{warn}\n"
+                     "Для включения откройте /adm, раздел Группы.")
     elif status in ("left", "kicked"):
         group = await db.get_group_by_chat(chat.id)
         if group and group["is_active"]:
             await db.set_group_active(group["id"], False)
-            await notify_owners(bot, f"➖ Бота убрали из «{esc(chat.title)}». Группа отключена.")
+            await notify_owners(bot, f"Бот удалён из группы <b>{esc(chat.title)}</b>. Группа отключена.")

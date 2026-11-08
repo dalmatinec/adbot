@@ -2,7 +2,7 @@
 
 Чтобы зеркала не плодили все подряд, новое зеркало сначала попадает в заявку:
 владельцам и модераторам приходит карточка с данными человека и кнопками
-«Принять» / «Отклонить». Пока решения нет, токен лежит в базе зашифрованным
+Принять / Отклонить. Пока решения нет, токен лежит в базе зашифрованным
 и бот зеркала не запускается. Отклонили или никто не ответил за
 APPLICATION_TTL_HOURS - заявка удаляется вместе с токеном.
 """
@@ -18,22 +18,22 @@ from ui import esc, fmt_dt, kb, user_link
 
 log = logging.getLogger(__name__)
 
-SOURCE_TEXT = {"quick": "создан быстро (случайные имя и юзернейм)", "token": "подключён по токену"}
+SOURCE_TEXT = {"quick": "создан быстрым способом (случайные имя и юзернейм)", "token": "подключён по токену"}
 
 
 def card_text(app, user) -> str:
     name = user["full_name"] if user else None
-    uname = f"@{esc(user['username'])}" if user and user["username"] else "—"
-    first_seen = fmt_dt(user["first_seen"]) if user else "—"
+    uname = f"@{esc(user['username'])}" if user and user["username"] else "нет"
+    first_seen = fmt_dt(user["first_seen"]) if user else "нет"
     return (
-        "📥 <b>Заявка на зеркало</b>\n\n"
+        "<b>Заявка на зеркало</b>\n\n"
         f"Пользователь: {user_link(app['user_id'], name)}\n"
         f"ID: <code>{app['user_id']}</code>\n"
         f"Username: {uname}\n"
         f"В боте с: {first_seen}\n"
         f"Заявка подана: {fmt_dt(app['created_at'])}\n"
         f"Бот: @{esc(app['username'])}, {SOURCE_TEXT.get(app['source'], app['source'])}\n"
-        f"Истекает: {fmt_dt(app['expires_at'])} (потом отклонится само)"
+        f"Срок рассмотрения до: {fmt_dt(app['expires_at'])} (по истечении заявка будет отклонена автоматически)"
     )
 
 
@@ -56,9 +56,9 @@ async def submit(bot, owner_id: int, me: dict, token: str, source: str,
     await notify_owners(bot, card_text(app, user), card_buttons(owner_id))
     await _tell_user(
         bot, owner_id,
-        f"📨 Заявка на зеркало @{esc(me.get('username'))} отправлена владельцам. "
-        f"Ответ придёт сюда. Если за {config.APPLICATION_TTL_HOURS} ч ответа не будет, "
-        "заявка отклонится сама, и её можно подать заново.")
+        f"Заявка на зеркало @{esc(me.get('username'))} направлена владельцам. "
+        f"Ответ будет отправлен в этот чат. Если в течение {config.APPLICATION_TTL_HOURS} ч решение не будет принято, "
+        "заявка будет отклонена автоматически, после чего её можно подать повторно.")
     return "ok"
 
 
@@ -74,8 +74,8 @@ async def approve(bot, manager, user_id: int) -> str | None:
     await manager.start(await db.get_mirror(mid))
     await _tell_user(
         bot, user_id,
-        f"✅ Заявка одобрена. Зеркало @{esc(app['username'])} готово: откройте его и нажмите /start, "
-        "там настраивается рассылка.",
+        f"Заявка одобрена. Зеркало @{esc(app['username'])} подключено. "
+        "Откройте его и нажмите Старт для настройки рассылки.",
         kb([[("🪞 Открыть зеркало", f"https://t.me/{app['username']}")]]))
     return app["username"]
 
@@ -88,8 +88,8 @@ async def reject(bot, user_id: int, reason: str = "отклонена владе
     await db.delete_application(user_id)
     await _tell_user(
         bot, user_id,
-        f"❌ Заявка на зеркало {reason}. Данные бота у нас удалены. "
-        "При необходимости можно подать новую.")
+        f"Заявка на зеркало {reason}. Данные бота удалены. "
+        "При необходимости можно подать новую заявку.")
     return True
 
 
@@ -98,11 +98,11 @@ async def expire_once(bot) -> int:
     for app in await db.expired_applications():
         user = await db.get_user(app["user_id"])
         if await reject(bot, app["user_id"],
-                        f"не рассмотрена за {config.APPLICATION_TTL_HOURS} ч и отклонена"):
+                        f"отклонена автоматически: решение не принято в течение {config.APPLICATION_TTL_HOURS} ч"):
             n += 1
             await notify_owners(
-                bot, f"⌛ Заявка {user_link(app['user_id'], user['full_name'] if user else None)} "
-                     f"на @{esc(app['username'])} истекла и отклонена, токен удалён.")
+                bot, f"Заявка {user_link(app['user_id'], user['full_name'] if user else None)} "
+                     f"на @{esc(app['username'])} отклонена автоматически по истечении срока, токен удалён.")
     return n
 
 

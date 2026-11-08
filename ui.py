@@ -44,7 +44,7 @@ async def show(target: Message | CallbackQuery, text: str, markup=None) -> None:
 def fmt_dt(iso_str: str | None) -> str:
     """UTC из базы -> '07.09.2026 01:08 (Алматы)'."""
     if not iso_str:
-        return "—"
+        return "нет"
     try:
         dt = datetime.fromisoformat(iso_str)
     except ValueError:
@@ -55,7 +55,7 @@ def fmt_dt(iso_str: str | None) -> str:
 
 
 def esc(value) -> str:
-    return html.escape(str(value)) if value is not None else "—"
+    return html.escape(str(value)) if value is not None else "нет"
 
 
 def user_link(user_id: int, name: str | None = None) -> str:

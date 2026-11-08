@@ -47,12 +47,12 @@ async def _menu(target, mirror) -> None:
     used = await db.count_posts(mirror["id"])
     live = sum(1 for p in await db.list_posts(mirror["id"]) if p["status"] == "active")
     if not _is_active(mirror):
-        text = f"{STATUS_ICON[mirror['status']]} Доступ к рассылке ограничен ({STATUS_TEXT[mirror['status']]}). Обратитесь к владельцам сети."
+        text = f"Доступ к рассылке ограничен: {STATUS_TEXT[mirror['status']]}. Обратитесь к владельцам сети."
     else:
         text = (
-            "🪞 <b>Кабинет рассылки</b>\n\n"
+            "<b>Кабинет рассылки</b>\n\n"
             f"Слоты: {used}/{mirror['slots']}\n"
-            f"Сейчас в эфире: {live}"
+            f"Активных рассылок: {live}"
         )
     await show(target, text, kb([
         [("➕ Новый пост", "c:new")],
@@ -114,8 +114,8 @@ def make_router() -> Router:
             await call.answer("Пока нет доступных групп для рассылки.", show_alert=True)
             return
         await state.set_state(CabinetStates.waiting_post)
-        await show(call, "📨 Пришлите пост одним сообщением: текст, фото, видео, GIF или файл. "
-                         "Можно переслать из канала или чата.\n\n/cancel для отмены.",
+        await show(call, "Отправьте пост одним сообщением: текст, фото, видео, GIF или файл. "
+                         "Пост можно переслать из канала или чата.\n\nДля отмены отправьте /cancel.",
                    kb([[("⬅️ Назад", "c:menu")]]))
 
     @r.message(CabinetStates.waiting_post)
@@ -124,11 +124,11 @@ def make_router() -> Router:
         mirror = await _staff_mirror(message.from_user.id, mirror_id)
         if not mirror or not _is_active(mirror):
             return
-        wait = await message.answer("⏳ Принимаю пост…")
+        wait = await message.answer("Пост принимается.")
         try:
             st_chat, st_msg, buttons, title = await posts.ingest(bot, main_bot, message)
         except posts.IngestError as exc:
-            await wait.edit_text(f"⚠️ {esc(exc)}")
+            await wait.edit_text(esc(exc))
             return
         await wait.delete()
         await state.update_data(st_chat=st_chat, st_msg=st_msg, buttons=buttons, title=title)
@@ -144,7 +144,7 @@ def make_router() -> Router:
         await state.set_state(CabinetStates.choosing_group)
         rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:pg:{g['id']}")] for g in groups]
         rows.append([("✖️ Отмена", "c:menu")])
-        await message.answer("Выберите группу для рассылки (одну):", reply_markup=kb(rows))
+        await message.answer("Выберите группу для рассылки. На один пост выбирается одна группа.", reply_markup=kb(rows))
 
     @r.callback_query(F.data.startswith("c:pg:"), CabinetStates.choosing_group)
     async def pick_group(call: CallbackQuery, state: FSMContext, main_bot: Bot, mirror_id: int) -> None:
@@ -173,11 +173,11 @@ def make_router() -> Router:
         )
         if pending:
             await _notify_moderators(main_bot, post_id, mirror, group, data)
-            text = "🕓 Пост принят и отправлен на проверку. Когда его одобрят, рассылка начнётся."
+            text = "Пост принят и направлен на проверку. После одобрения рассылка будет запущена."
         else:
             interval = await db.effective_interval(group["interval_minutes"])
-            text = (f"✅ Пост принят. Рассылка в «{esc(group['title'])}» "
-                    f"каждые {fmt_interval(interval)}. Первая отправка в течение минуты.")
+            text = (f"Пост принят. Рассылка в группу <b>{esc(group['title'])}</b> "
+                    f"будет выполняться каждые {fmt_interval(interval)}. Первая отправка в течение минуты.")
         await message.answer(text, reply_markup=kb([[("📋 Мои посты", "c:posts"), ("🏠 Меню", "c:menu")]]))
 
     # ---------- мои посты ----------
@@ -189,7 +189,7 @@ def make_router() -> Router:
         items = await db.list_posts(mirror_id)
         rows = [[(f"{STATUS_ICON[p['status']]} {p['title']}", f"c:post:{p['id']}")] for p in items]
         rows.append([("⬅️ Назад", "c:menu")])
-        await show(call, "📋 <b>Ваши посты</b>" if items else "У вас пока нет постов.", kb(rows))
+        await show(call, "<b>Ваши посты</b>" if items else "У вас пока нет постов.", kb(rows))
 
     async def _post_card(call: CallbackQuery, post) -> None:
         group = await db.get_group(post["group_id"])
@@ -197,8 +197,8 @@ def make_router() -> Router:
         lines = [
             f"{STATUS_ICON[post['status']]} <b>{esc(post['title'])}</b>",
             f"Статус: {STATUS_TEXT.get(post['status'], post['status'])}",
-            f"Группа: {esc(group['title']) if group else '—'}",
-            f"Интервал: {fmt_interval(interval) if interval else '—'} (задают владельцы)",
+            f"Группа: {esc(group['title']) if group else 'нет'}",
+            f"Интервал: {fmt_interval(interval) if interval else 'нет'} (устанавливается владельцами)",
             f"Создан: {fmt_dt(post['created_at'])}",
             f"Отчёт с: {fmt_dt(post['started_at'])}",
             f"Отправлено: {post['sent_count']}, ошибок: {post['error_count']}",
@@ -247,7 +247,7 @@ def make_router() -> Router:
     async def post_delete_ask(call: CallbackQuery, mirror_id: int) -> None:
         post = await _own_post(call, mirror_id)
         if post:
-            await show(call, f"Удалить пост «{esc(post['title'])}»? Статистика поста пропадёт.",
+            await show(call, f"Удалить пост {esc(post['title'])}? Статистика поста будет удалена.",
                        kb([[("🗑 Да, удалить", f"c:pdc:{post['id']}")],
                            [("⬅️ Отмена", f"c:post:{post['id']}")]]))
 
@@ -267,7 +267,7 @@ def make_router() -> Router:
             return
         items = await db.list_posts(mirror_id)
         total = await db.mirror_stats(mirror_id)
-        lines = ["📊 <b>Статистика</b> (с момента создания каждой рассылки)\n"]
+        lines = ["<b>Статистика</b> (с момента создания каждой рассылки)\n"]
         for p in items:
             lines.append(
                 f"{STATUS_ICON[p['status']]} {esc(p['title'])}\n"
@@ -282,8 +282,8 @@ def make_router() -> Router:
 
     async def _admins_screen(target, mirror, is_owner: bool) -> None:
         admins = await db.list_mirror_admins(mirror["id"])
-        lines = [f"👥 <b>Админы</b> (максимум {config.MAX_MIRROR_ADMINS} с создателем)\n",
-                 f"👑 Создатель: {user_link(mirror['owner_id'])}"]
+        lines = [f"<b>Администраторы</b> (не более {config.MAX_MIRROR_ADMINS} включая создателя)\n",
+                 f"Создатель: {user_link(mirror['owner_id'])}"]
         rows = []
         for a in admins:
             lines.append(f"• {user_link(a['user_id'])}")
@@ -306,8 +306,8 @@ def make_router() -> Router:
         if not mirror or mirror["owner_id"] != call.from_user.id:
             return
         await state.set_state(CabinetStates.adding_admin)
-        await show(call, "Пришлите Telegram ID нового админа или перешлите любое его сообщение. "
-                         "Человек должен хотя бы раз открыть этого бота.\n\n/cancel для отмены.",
+        await show(call, "Отправьте Telegram ID нового администратора или перешлите любое его сообщение. "
+                         "Пользователь должен хотя бы один раз открыть этого бота.\n\nДля отмены отправьте /cancel.",
                    kb([[("⬅️ Назад", "c:admins")]]))
 
     @r.message(CabinetStates.adding_admin)
@@ -322,13 +322,13 @@ def make_router() -> Router:
         elif message.text and message.text.strip().isdigit():
             uid = int(message.text.strip())
         if uid is None:
-            await message.answer("Нужен числовой ID или пересланное сообщение человека.")
+            await message.answer("Требуется числовой ID или пересланное сообщение пользователя.")
             return
         result = await db.add_mirror_admin(mirror_id, uid)
         await state.clear()
-        note = {"ok": "✅ Админ добавлен.", "exists": "Он уже админ.",
-                "owner": "Это вы, создатель.",
-                "limit": f"Достигнут лимит: {config.MAX_MIRROR_ADMINS} человека с вами."}[result]
+        note = {"ok": "Администратор добавлен.", "exists": "Пользователь уже является администратором.",
+                "owner": "Вы являетесь создателем зеркала.",
+                "limit": f"Достигнут лимит: не более {config.MAX_MIRROR_ADMINS} человек, включая создателя."}[result]
         await message.answer(note)
         await _admins_screen(message, await db.get_mirror(mirror_id), True)
 
@@ -345,7 +345,7 @@ def make_router() -> Router:
 
 async def _notify_moderators(main_bot: Bot, post_id: int, mirror, group, data: dict) -> None:
     """Предпросмотр поста и кнопки одобрения всем владельцам и модераторам."""
-    text = (f"🕓 <b>Новый пост на проверку</b> #{post_id}\n"
+    text = (f"<b>Новый пост на проверку</b> #{post_id}\n"
             f"Зеркало: @{esc(mirror['username'])} (владелец {user_link(mirror['owner_id'])})\n"
             f"Группа: {esc(group['title'])}")
     markup = kb([[("✅ Одобрить", f"a:ok:{post_id}"), ("❌ Отклонить", f"a:no:{post_id}")]])
