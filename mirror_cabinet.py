@@ -97,7 +97,7 @@ def make_router() -> Router:
     # ---------- новый пост ----------
 
     @r.callback_query(F.data == "c:new")
-    async def new_post(call: CallbackQuery, state: FSMContext, main_bot: Bot, mirror_id: int) -> None:
+    async def new_post(call: CallbackQuery, state: FSMContext, mirror_id: int) -> None:
         mirror = await _staff_mirror(call.from_user.id, mirror_id)
         if not mirror:
             return
@@ -113,22 +113,10 @@ def make_router() -> Router:
         if not await db.list_groups(active_only=True):
             await call.answer("Пока нет доступных групп для рассылки.", show_alert=True)
             return
-        draft = await db.take_draft(call.from_user.id, mirror_id)
-        if draft:
-            data = {"st_chat": draft["storage_chat_id"], "st_msg": draft["storage_message_id"],
-                    "buttons": draft["buttons"], "title": draft["title"]}
-            await state.update_data(**data)
-            await call.answer()
-            await _choose_group(call.message, state, main_bot, mirror, call.from_user.id)
-            return
         await state.set_state(CabinetStates.waiting_post)
-        me = await main_bot.me()
-        await show(call, "Чтобы сохранить премиум-эмодзи, отправьте пост через основного бота: "
-                         "нажмите кнопку ниже, пришлите пост и вернитесь сюда.\n\n"
-                         "Можно отправить пост и прямо здесь, но премиум-эмодзи в этом случае "
-                         "заменятся обычными.\n\nДля отмены отправьте /cancel.",
-                   kb([[("📨 Отправить пост через основного бота", f"https://t.me/{me.username}?start=post")],
-                       [("⬅️ Назад", "c:menu")]]))
+        await show(call, "Отправьте пост одним сообщением: текст, фото, видео, GIF или файл. "
+                         "Пост можно переслать из канала или чата.\n\nДля отмены отправьте /cancel.",
+                   kb([[("⬅️ Назад", "c:menu")]]))
 
     @r.message(CabinetStates.waiting_post)
     async def got_post(message: Message, state: FSMContext, bot: Bot,
@@ -145,16 +133,13 @@ def make_router() -> Router:
         await wait.delete()
         await state.update_data(st_chat=st_chat, st_msg=st_msg, buttons=buttons, title=title)
 
-        await _choose_group(message, state, main_bot, mirror, message.from_user.id)
-
-    async def _choose_group(message: Message, state: FSMContext, main_bot: Bot, mirror, user_id: int) -> None:
         groups = await db.list_groups(active_only=True)
         if not groups:
             await state.clear()
             await message.answer("Сейчас нет доступных групп. Попробуйте позже.")
             return
         if len(groups) == 1:
-            await _finalize(message, state, main_bot, mirror, user_id, groups[0]["id"])
+            await _finalize(message, state, main_bot, mirror, message.from_user.id, groups[0]["id"])
             return
         await state.set_state(CabinetStates.choosing_group)
         rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:pg:{g['id']}")] for g in groups]

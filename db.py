@@ -101,16 +101,6 @@ CREATE TABLE IF NOT EXISTS send_log (
     error     TEXT
 );
 
-CREATE TABLE IF NOT EXISTS drafts (
-    user_id    INTEGER PRIMARY KEY,
-    mirror_id  INTEGER NOT NULL,
-    storage_chat_id    INTEGER NOT NULL,
-    storage_message_id INTEGER NOT NULL,
-    buttons    TEXT,
-    title      TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -674,24 +664,3 @@ async def recent_errors(limit: int = 10):
 async def cleanup_log(days: int = 30) -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
     return await execute("DELETE FROM send_log WHERE sent_at < ?", (cutoff,))
-
-
-# ---------- черновики постов (пост, присланный основному боту) ----------
-
-async def save_draft(user_id: int, mirror_id: int, st_chat: int, st_msg: int,
-                     buttons: str | None, title: str) -> None:
-    await execute(
-        "INSERT INTO drafts(user_id, mirror_id, storage_chat_id, storage_message_id, buttons, title, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET mirror_id=excluded.mirror_id, "
-        "storage_chat_id=excluded.storage_chat_id, storage_message_id=excluded.storage_message_id, "
-        "buttons=excluded.buttons, title=excluded.title, created_at=excluded.created_at",
-        (user_id, mirror_id, st_chat, st_msg, buttons, title, now()),
-    )
-
-
-async def take_draft(user_id: int, mirror_id: int):
-    """Забирает черновик (и удаляет его). None, если нет или он от другого зеркала."""
-    row = await one("SELECT * FROM drafts WHERE user_id=? AND mirror_id=?", (user_id, mirror_id))
-    if row:
-        await execute("DELETE FROM drafts WHERE user_id=?", (user_id,))
-    return row
