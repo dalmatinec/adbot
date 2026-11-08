@@ -32,11 +32,14 @@ async def show(target: Message | CallbackQuery, text: str, markup=None) -> None:
     """Для кнопки правим текущее сообщение, для команды отправляем новое."""
     if isinstance(target, CallbackQuery):
         try:
+            await target.answer()  # сразу снимаем индикатор загрузки на кнопке
+        except TelegramBadRequest:
+            pass  # кнопка устарела, экран всё равно обновим
+        try:
             await target.message.edit_text(text, reply_markup=markup)
         except TelegramBadRequest as exc:
             if "not modified" not in str(exc):
                 await target.message.answer(text, reply_markup=markup)
-        await target.answer()
     else:
         await target.answer(text, reply_markup=markup)
 
