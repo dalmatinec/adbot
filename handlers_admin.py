@@ -1,705 +1,790 @@
-"""
-/adm - основная админ-панель. Полностью inline, без нижней клавиатуры.
-Все хендлеры защищены фильтром IsAdmin - если пишет не админ, aiogram не
-находит хендлер, и бот молчит (никакого сообщения об отказе).
+"""Админка владельцев основного бота (/adm).
+
+Роли: owner - всё; moderator - зеркала (пауза/блокировка), пользователи (баны),
+модерация постов и статистика. Все настройки рассылки - группы, интервал,
+слоты, модерация - только у owner.
 """
 
-import html
-import re
+import asyncio
+import logging
 
-from aiogram import Router, F, Bot
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message, MessageEntity
 
-from aiogram.types import FSInputFile
-
+import applications
+import backup
 import config
-import database
-import keyboards
-import mentions
-import timeutils
-from filters import IsAdmin
-from states import AdminStates, OwnerBroadcastStates
+import db
+from ui import STATUS_ICON, STATUS_TEXT, esc, fmt_dt, fmt_interval, kb, show, user_link
 
+log = logging.getLogger(__name__)
 router = Router()
-router.message.filter(F.chat.type == "private", IsAdmin())
-router.callback_query.filter(F.message.chat.type == "private", IsAdmin())
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
+
+PAGE = 8
+
+
+class AdminStates(StatesGroup):
+    add_group = State()
+    group_interval = State()      # data: gid
+    global_interval = State()
+    user_search = State()
+    add_owner = State()
+    stopwords = State()
+    bc_wait = State()             # data: audience
+    bc_confirm = State()
+    newmain = State()
+
+
+async def _role(user_id: int) -> str | None:
+    return await db.get_role(user_id)
+
+
+async def _need(event, owner_only: bool = False) -> str | None:
+    """Роль, если доступ есть; иначе None (для чужих бот молчит)."""
+    role = await _role(event.from_user.id)
+    if role is None:
+        return None
+    if owner_only and role != "owner":
+        if isinstance(event, CallbackQuery):
+            await event.answer("Только для владельцев", show_alert=True)
+        return None
+    return role
+
+
+# ---------- меню ----------
+
+async def _menu(target, role: str) -> None:
+    n_apps = await db.count_applications()
+    apps_btn = (f"📥 Заявки ({n_apps})" if n_apps else "📥 Заявки", "a:apps")
+    rows = [[apps_btn, ("🪞 Зеркала", "a:mirrors:0")],
+            [("👥 Пользователи", "a:users"), ("📊 Статистика", "a:stats")]]
+    if role == "owner":
+        rows = [[apps_btn, ("🪞 Зеркала", "a:mirrors:0")],
+                [("🏘 Группы", "a:groups"), ("👥 Пользователи", "a:users")],
+                [("📊 Статистика", "a:stats")],
+                [("📢 Рассылка", "a:bc"), ("⚙️ Настройки", "a:set")],
+                [("👑 Владельцы", "a:owners"), ("💾 Бэкап", "a:bk")]]
+    rows.append([("⬅️ В начало", "m:home")])
+    await show(target, "⚙️ <b>Админка</b>", kb(rows))
 
 
 @router.message(Command("adm"))
 async def cmd_adm(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(await database.t("ADMIN_MENU_TITLE"), reply_markup=keyboards.admin_menu_kb())
+    role = await _need(message)
+    if role:
+        await _menu(message, role)
 
 
-@router.message(Command("factory_reset"))
-async def cmd_factory_reset(message: Message, state: FSMContext) -> None:
-    """Очистка перед передачей бота новому клиенту: удаляет ключи, рассылки,
-    целевые чаты, статистику отправок и баны. Тексты/кнопки (/admin1) и
-    список супер-админов не трогает - они хранятся отдельно (content.db)."""
+@router.callback_query(F.data == "a:menu")
+async def menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(
-        "⚠️ Это удалит ВСЕ ключи, рассылки, целевые чаты, статистику отправок и баны "
-        "из текущей базы.\n\n"
-        "Тексты и оформление кнопок (/admin1) не пострадают - они хранятся отдельно.\n\n"
-        "Действие необратимо. Подтвердить очистку?",
-        reply_markup=keyboards.factory_reset_confirm_kb(),
-    )
+    role = await _need(call)
+    if role:
+        await _menu(call, role)
 
 
-@router.callback_query(F.data == "adm_factory_reset_confirm")
-async def cb_factory_reset_confirm(call: CallbackQuery) -> None:
-    await database.factory_reset()
-    await call.answer("✅ Операционные данные очищены.", show_alert=True)
-    await call.message.edit_text(await database.t("ADMIN_MENU_TITLE"), reply_markup=keyboards.admin_menu_kb())
+# ---------- группы ----------
 
-
-@router.callback_query(F.data == "adm_factory_reset_cancel")
-async def cb_factory_reset_cancel(call: CallbackQuery) -> None:
-    await call.answer("Отменено.")
-    await call.message.edit_text(await database.t("ADMIN_MENU_TITLE"), reply_markup=keyboards.admin_menu_kb())
-
-
-@router.callback_query(F.data == "adm_menu")
-async def cb_adm_menu(call: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await call.message.edit_text(await database.t("ADMIN_MENU_TITLE"), reply_markup=keyboards.admin_menu_kb())
-    await call.answer()
-
-
-@router.callback_query(F.data == "noop")
-async def cb_noop(call: CallbackQuery) -> None:
-    # Кнопка-"заглушка" (например, сам владелец в списке супер-админов) -
-    # просто гасим часики, действия не требуется.
-    await call.answer()
-
-
-# ---------- ключи ----------
-
-@router.callback_query(F.data == "adm_keys")
-async def cb_adm_keys(call: CallbackQuery) -> None:
-    await call.message.edit_text(await database.t("ADMIN_KEYS_MENU_TITLE"), reply_markup=keyboards.keys_menu_kb())
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm_key_new")
-async def cb_adm_key_new(call: CallbackQuery) -> None:
-    # call.answer() - ПЕРВЫМ делом, до записи в БД. У Telegram есть жёсткий
-    # лимит: если не ответить на callback_query в течение ~15 секунд, он
-    # "протухает" и следующий call.answer() падает с TelegramBadRequest
-    # "query is too old". Раньше это было последней строкой, и если
-    # database.create_key() подвисало (см. фикс блокировок БД в database.py),
-    # ответить уже не успевали - отсюда ощущение, что создание ключа "виснет".
-    await call.answer()
-    code = await database.create_key()
-    await call.message.answer(await database.t("ADMIN_KEY_CREATED", code=code), parse_mode="Markdown")
-
-
-@router.callback_query(F.data == "adm_key_list")
-async def cb_adm_key_list(call: CallbackQuery) -> None:
-    keys = await database.list_all_keys()
-    if not keys:
-        try:
-            await call.message.edit_text(await database.t("ADMIN_NO_KEYS"), reply_markup=keyboards.keys_menu_kb())
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
-        return await call.answer()
-    await call.message.edit_text(
-        await database.t("ADMIN_KEY_LIST_TITLE"), reply_markup=await keyboards.keys_list_kb(keys)
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_key_open:"))
-async def cb_adm_key_open(call: CallbackQuery) -> None:
-    key_id = int(call.data.split(":")[1])
-    key_row = await database.get_key_by_id(key_id)
-    if not key_row:
-        await call.answer("Ключ не найден - возможно, уже отозван.", show_alert=True)
-        keys = await database.list_all_keys()
-        if not keys:
-            return await call.message.edit_text(await database.t("ADMIN_NO_KEYS"), reply_markup=keyboards.keys_menu_kb())
-        return await call.message.edit_text(
-            await database.t("ADMIN_KEY_LIST_TITLE"), reply_markup=await keyboards.keys_list_kb(keys)
-        )
-    header = f"🔑 Ключ: {key_row['key_code']}"
-    created_line = f"Создан: {timeutils.fmt_dt(key_row['created_at'])}"
-    activated_line = f"Активирован: {timeutils.fmt_dt(key_row['activated_at'])}"
-    if key_row["owner_id"]:
-        status_line, status_entities = await mentions.mention_line_with_id("Статус: занят - владелец ", key_row["owner_id"])
-    else:
-        status_line, status_entities = "Статус: свободен", []
-    text, entities = mentions.join_lines([
-        (header, []), (status_line, status_entities), (created_line, []), (activated_line, []),
-    ])
-    await call.message.edit_text(text, entities=entities or None, parse_mode=None,
-                                  reply_markup=keyboards.key_card_kb(key_id))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_key_del:"))
-async def cb_adm_key_del(call: CallbackQuery) -> None:
-    key_id = int(call.data.split(":")[1])
-    key_row = await database.get_key_by_id(key_id)
-    if not key_row:
-        return await call.answer()
-    await call.message.edit_text(
-        await database.t("ADMIN_KEY_REVOKE_CONFIRM", code=key_row["key_code"]),
-        reply_markup=keyboards.key_delete_confirm_kb(key_id),
-        parse_mode="Markdown",
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_key_del_confirm:"))
-async def cb_adm_key_del_confirm(call: CallbackQuery) -> None:
-    key_id = int(call.data.split(":")[1])
-    key_row = await database.get_key_by_id(key_id)
-    code = key_row["key_code"] if key_row else "?"
-    await database.delete_key(key_id)
-    await call.answer(await database.t("ADMIN_KEY_REVOKED", code=code), show_alert=True)
-    keys = await database.list_all_keys()
-    if not keys:
-        return await call.message.edit_text(await database.t("ADMIN_NO_KEYS"), reply_markup=keyboards.keys_menu_kb())
-    await call.message.edit_text(
-        await database.t("ADMIN_KEY_LIST_TITLE"), reply_markup=await keyboards.keys_list_kb(keys)
-    )
-
-
-# ---------- целевые чаты ----------
-
-@router.callback_query(F.data == "adm_targets")
-async def cb_adm_targets(call: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    chats = await database.list_target_chats_with_stats()
-    if not chats:
-        await call.message.edit_text(
-            "Целевых чатов пока нет.\n\n"
-            "Добавьте бота администратором в нужную группу/канал, узнайте её ID "
-            "(например через @userinfobot, переслав туда любое сообщение) и нажмите \"Добавить группу\".",
-            reply_markup=keyboards.targets_list_kb(chats),
-        )
-        return await call.answer()
-    await call.message.edit_text("🎯 Целевые чаты (в скобках - сколько рассылок туда уже ушло):",
-                                  reply_markup=keyboards.targets_list_kb(chats))
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm_target_add")
-async def cb_adm_target_add(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AdminStates.entering_target_chat)
-    await call.message.edit_text(
-        await database.t("ADMIN_ASK_TARGET_CHAT_ID"),
-        reply_markup=keyboards.back_to_admin_kb(),
-    )
-    await call.answer()
-
-
-@router.message(AdminStates.entering_target_chat)
-async def msg_target_chat(message: Message, state: FSMContext, bot: Bot) -> None:
-    try:
-        chat_id = int(message.text.strip())
-    except (ValueError, AttributeError):
-        return await message.answer("Некорректный ID. Пришлите числом, например -1001234567890.")
-    title = None
-    try:
-        chat = await bot.get_chat(chat_id)
-        title = chat.title or chat.full_name
-    except Exception:
-        # бот не в чате / нет доступа - всё равно добавляем по ID,
-        # просто без красивого названия в списке
-        pass
-    await database.add_target_chat(chat_id, title)
-    await state.clear()
-    chats = await database.list_target_chats_with_stats()
-    label = title or str(chat_id)
-    await message.answer(
-        f"🎯 Группа добавлена: {label}\nТеперь рассылки автоматически идут и туда.",
-        reply_markup=keyboards.targets_list_kb(chats),
-    )
-
-
-@router.callback_query(F.data.startswith("adm_target_open:"))
-async def cb_adm_target_open(call: CallbackQuery) -> None:
-    chat_id = int(call.data.split(":")[1])
-    chat = await database.get_target_chat(chat_id)
-    if not chat:
-        await call.answer("Группа не найдена - возможно, уже удалена.", show_alert=True)
-        chats = await database.list_target_chats_with_stats()
-        return await call.message.edit_text("🎯 Целевые чаты:", reply_markup=keyboards.targets_list_kb(chats))
-    # Заголовок: если у чата есть название - показываем его и отдельно ID.
-    # Если названия нет (бот не смог его получить), title == None, и раньше
-    # ID выводился дважды подряд ("🎯 -100... / ID: -100...") - теперь только один раз.
-    if chat["title"]:
-        lines = [f"🎯 {chat['title']}", f"ID: {chat_id}", ""]
-    else:
-        lines = [f"🎯 ID {chat_id}", ""]
-    # Без разбивки по ключам/пользователям - при сотне рекламодателей такой
-    # список не влезет в одно сообщение. Подробности по конкретному
-    # рекламодателю смотрите в разделе "Пользователи".
-    summary = await database.chat_stats_summary(chat_id)
-    lines.append(f"Рассылок отправлено сюда: {summary['total_sent']} (сегодня: {summary['sent_today']})")
-    await call.message.edit_text("\n".join(lines), reply_markup=keyboards.target_card_kb(chat_id))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_target_del:"))
-async def cb_adm_target_del(call: CallbackQuery) -> None:
-    chat_id = int(call.data.split(":")[1])
-    await call.message.edit_text(
-        "Удалить эту группу из списка целевых? Рассылки перестанут туда уходить "
-        "(статистика по прошлым отправкам сохранится).",
-        reply_markup=keyboards.target_delete_confirm_kb(chat_id),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_target_del_confirm:"))
-async def cb_adm_target_del_confirm(call: CallbackQuery) -> None:
-    chat_id = int(call.data.split(":")[1])
-    await database.remove_target_chat(chat_id)
-    await call.answer("🗑 Группа удалена.", show_alert=True)
-    chats = await database.list_target_chats_with_stats()
-    await call.message.edit_text("🎯 Целевые чаты:", reply_markup=keyboards.targets_list_kb(chats))
-
-
-# ---------- супер-админы ----------
-
-@router.callback_query(F.data == "adm_superadmins")
-async def cb_adm_superadmins(call: CallbackQuery) -> None:
-    admins = await database.list_admins()
-    await call.message.edit_text(
-        await database.t("ADMIN_SUPERADMINS_TITLE"), reply_markup=keyboards.superadmins_kb(admins, config.OWNER_ID)
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm_superadmin_add")
-async def cb_adm_superadmin_add(call: CallbackQuery, state: FSMContext) -> None:
-    admins = await database.list_admins()
-    if len(admins) >= config.MAX_SUPER_ADMINS:
-        return await call.answer(
-            await database.t("ADMIN_SUPERADMIN_LIMIT", limit=config.MAX_SUPER_ADMINS), show_alert=True
-        )
-    await state.set_state(AdminStates.entering_superadmin_id)
-    await call.message.edit_text(await database.t("ADMIN_ASK_SUPERADMIN_ID"), reply_markup=keyboards.back_to_admin_kb())
-    await call.answer()
-
-
-@router.message(AdminStates.entering_superadmin_id)
-async def msg_superadmin_id(message: Message, state: FSMContext) -> None:
-    try:
-        user_id = int(message.text.strip())
-    except (ValueError, AttributeError):
-        return await message.answer("Некорректный ID.")
-    added = await database.add_admin(user_id)
-    await state.clear()
-    if added:
-        await message.answer(await database.t("ADMIN_SUPERADMIN_ADDED", user_id=user_id))
-    else:
-        await message.answer(await database.t("ADMIN_SUPERADMIN_LIMIT", limit=config.MAX_SUPER_ADMINS))
-    admins = await database.list_admins()
-    await message.answer(
-        await database.t("ADMIN_SUPERADMINS_TITLE"), reply_markup=keyboards.superadmins_kb(admins, config.OWNER_ID)
-    )
-
-
-@router.callback_query(F.data.startswith("adm_superadmin_del:"))
-async def cb_adm_superadmin_del(call: CallbackQuery) -> None:
-    user_id = int(call.data.split(":")[1])
-    await database.remove_admin(user_id)
-    await call.answer(await database.t("ADMIN_SUPERADMIN_REMOVED", user_id=user_id), show_alert=True)
-    admins = await database.list_admins()
-    await call.message.edit_text(
-        await database.t("ADMIN_SUPERADMINS_TITLE"), reply_markup=keyboards.superadmins_kb(admins, config.OWNER_ID)
-    )
-
-
-# ---------- пользователи ----------
-
-@router.callback_query(F.data == "adm_users")
-async def cb_adm_users(call: CallbackQuery) -> None:
-    owners = await database.list_owners()
-    orphans = await database.find_orphan_broadcasts()
-    if not owners and not orphans:
-        text = await database.t("ADMIN_NO_USERS")
-        await call.message.edit_text(text, reply_markup=keyboards.users_list_kb())
-        return await call.answer()
-
-    rows = []
-    for o in owners:
-        user_id = o["owner_id"]
-        broadcasts = await database.list_broadcasts(o["id"])
-        try:
-            label = await mentions.button_label(user_id)
-        except Exception:
-            label = f"user_{user_id}"
-        rows.append({
-            "user_id": user_id,
-            "label": label,
-            "banned": await database.is_banned(user_id),
-            "total_count": len(broadcasts),
-            "active_count": sum(1 for b in broadcasts if b["is_active"]),
-        })
-
-    text = await database.t("ADMIN_USERS_LIST_TITLE")
-    kb = await keyboards.owners_list_kb(rows, len(orphans))
-    await call.message.edit_text(text, reply_markup=kb)
-    await call.answer()
-
-
-# ---------- рассылки без ключа (см. database.find_orphan_broadcasts) ----------
-
-@router.callback_query(F.data == "adm_orphans")
-async def cb_adm_orphans(call: CallbackQuery) -> None:
-    orphans = await database.find_orphan_broadcasts()
-    if not orphans:
-        return await call.answer("Таких рассылок больше нет.", show_alert=True)
-    await call.message.edit_text(
-        "⚠️ Рассылки без ключа (ключ удалён не через /adm - обычно правкой базы "
-        "напрямую). Включённые сюда не попадут по расписанию - планировщик сам "
-        "выключает их на первом же тике.",
-        reply_markup=keyboards.orphans_list_kb(orphans),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_orphan_open:"))
-async def cb_adm_orphan_open(call: CallbackQuery) -> None:
-    broadcast_id = int(call.data.split(":")[1])
-    broadcast = await database.get_broadcast(broadcast_id)
-    if not broadcast:
-        return await call.answer("Рассылка уже удалена.", show_alert=True)
-    text = (
-        f"⚠️ Рассылка #{broadcast['id']} «{html.escape(broadcast['title'])}»\n"
-        f"Интервал: {broadcast['interval_hours']} ч.\n"
-        f"Статус: {'🟢 включена' if broadcast['is_active'] else '⚪️ выключена'}\n\n"
-        "Ключ, которому она принадлежала, в базе не найден."
-    )
-    await call.message.edit_text(text, reply_markup=keyboards.orphan_card_kb(broadcast_id, broadcast["is_active"]))
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_orphan_off:"))
-async def cb_adm_orphan_off(call: CallbackQuery) -> None:
-    broadcast_id = int(call.data.split(":")[1])
-    await database.toggle_broadcast(broadcast_id, False)
-    await call.answer("⏸ Выключена.", show_alert=True)
-    broadcast = await database.get_broadcast(broadcast_id)
-    if not broadcast:
+@router.callback_query(F.data == "a:groups")
+async def groups(call: CallbackQuery, state: FSMContext | None = None) -> None:
+    if state is not None:
+        await state.clear()
+    if not await _need(call, True):
         return
-    await call.message.edit_reply_markup(reply_markup=keyboards.orphan_card_kb(broadcast_id, False))
+    items = await db.list_groups()
+    gi = await db.global_interval()
+    rows = []
+    for g in items:
+        icon = "🟢" if g["is_active"] else "⚪"
+        rows.append([(f"{icon} {g['title'] or g['chat_id']}", f"a:g:{g['id']}")])
+    rows.append([("➕ Добавить по ID", "a:ga")])
+    rows.append([("⬅️ Назад", "a:menu")])
+    text = (f"🏘 <b>Группы для рассылки</b>\nОбщий интервал: {fmt_interval(gi)}\n\n"
+            "Бот сам предлагает группу, когда его добавляют админом. Включите её здесь."
+            if items else "Групп пока нет. Добавьте бота админом в чат или введите ID вручную.")
+    await show(call, text, kb(rows))
 
 
-@router.callback_query(F.data.startswith("adm_orphan_del:"))
-async def cb_adm_orphan_del(call: CallbackQuery) -> None:
-    broadcast_id = int(call.data.split(":")[1])
-    await database.delete_broadcast(broadcast_id)
-    await call.answer("🗑 Удалена.", show_alert=True)
-    orphans = await database.find_orphan_broadcasts()
-    if not orphans:
-        return await call.message.edit_text(
-            "Рассылок без ключа больше нет.", reply_markup=keyboards.back_to_admin_kb(),
-        )
-    await call.message.edit_text(
-        "⚠️ Рассылки без ключа:", reply_markup=keyboards.orphans_list_kb(orphans),
-    )
+async def _group_card(call: CallbackQuery, gid: int) -> None:
+    g = await db.get_group(gid)
+    if not g:
+        await groups(call)
+        return
+    interval = await db.effective_interval(g["interval_minutes"])
+    n_posts = (await db.one("SELECT COUNT(*) AS c FROM posts WHERE group_id=?", (gid,)))["c"]
+    own = "свой" if g["interval_minutes"] else "общий"
+    text = (f"🏘 <b>{esc(g['title'])}</b>\nID чата: <code>{g['chat_id']}</code>\n"
+            f"Статус: {'🟢 включена' if g['is_active'] else '⚪ выключена'}\n"
+            f"Интервал: {fmt_interval(interval)} ({own})\nПостов: {n_posts}")
+    await show(call, text, kb([
+        [("⏸ Выключить" if g["is_active"] else "▶️ Включить", f"a:gt:{gid}")],
+        [("⏱ Интервал", f"a:gi:{gid}")],
+        [("🗑 Удалить", f"a:gd:{gid}")],
+        [("⬅️ К группам", "a:groups")],
+    ]))
 
 
-@router.callback_query(F.data == "adm_user_search")
-async def cb_adm_user_search(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(AdminStates.entering_user_search_id)
-    await call.message.edit_text("Пришлите Telegram ID пользователя для поиска:", reply_markup=keyboards.back_to_admin_kb())
-    await call.answer()
+@router.callback_query(F.data.startswith("a:g:"))
+async def group_open(call: CallbackQuery) -> None:
+    if await _need(call, True):
+        await _group_card(call, int(call.data.split(":")[2]))
 
 
-@router.message(AdminStates.entering_user_search_id)
-async def msg_user_search(message: Message, state: FSMContext) -> None:
-    try:
-        user_id = int(message.text.strip())
-    except (ValueError, AttributeError):
-        return await message.answer("Некорректный ID.")
+@router.callback_query(F.data.startswith("a:gt:"))
+async def group_toggle(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    gid = int(call.data.split(":")[2])
+    g = await db.get_group(gid)
+    if g:
+        await db.set_group_active(gid, not g["is_active"])
+    await _group_card(call, gid)
+
+
+@router.callback_query(F.data.startswith("a:gi:"))
+async def group_interval(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    gid = int(call.data.split(":")[2])
+    presets = [30, 60, 120, 180, 360, 720]
+    rows = [[(fmt_interval(m), f"a:gip:{gid}:{m}") for m in presets[i:i + 3]] for i in (0, 3)]
+    rows.append([("Общий", f"a:gip:{gid}:0"), ("✏️ Свой", f"a:gic:{gid}")])
+    rows.append([("⬅️ Назад", f"a:g:{gid}")])
+    await show(call, f"⏱ Интервал группы (минимум {config.MIN_INTERVAL_MINUTES} мин.).\n"
+                     "«Общий» берёт значение из настроек.", kb(rows))
+
+
+@router.callback_query(F.data.startswith("a:gip:"))
+async def group_interval_set(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    _, _, gid, minutes = call.data.split(":")
+    value = int(minutes)
+    await db.set_group_interval(int(gid), None if value == 0 else max(value, config.MIN_INTERVAL_MINUTES))
+    await _group_card(call, int(gid))
+
+
+@router.callback_query(F.data.startswith("a:gic:"))
+async def group_interval_custom(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _need(call, True):
+        return
+    gid = int(call.data.split(":")[2])
+    await state.set_state(AdminStates.group_interval)
+    await state.update_data(gid=gid)
+    await show(call, "Пришлите интервал в минутах числом, например 90.", kb([[("⬅️ Отмена", f"a:g:{gid}")]]))
+
+
+@router.message(AdminStates.group_interval)
+async def group_interval_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    if not (message.text or "").strip().isdigit():
+        await message.answer("Нужно число минут.")
+        return
+    gid = (await state.get_data())["gid"]
     await state.clear()
-    text, entities, kb = await _build_user_card(user_id)
-    await message.answer(text, entities=entities, parse_mode=None, reply_markup=kb)
+    await db.set_group_interval(gid, max(int(message.text), config.MIN_INTERVAL_MINUTES))
+    await message.answer("✅ Интервал сохранён.", reply_markup=kb([[("К группе", f"a:g:{gid}")]]))
 
 
-async def _build_user_card(user_id: int):
-    """Общий рендер карточки пользователя: (текст, entities, клавиатура).
-    Используется и при открытии из списка, и при поиске по ID, и после
-    бана/разбана/отзыва ключа."""
-    key_row = await database.get_key_by_owner(user_id)
-    banned = await database.is_banned(user_id)
-    header, entities = await mentions.mention_line_with_id("👤 Пользователь ", user_id)
-    lines = [(header, entities), (f"Статус: {'🚫 забанен' if banned else '✅ активен'}", [])]
-    broadcasts = []
-    key_id = None
-    if key_row:
-        key_id = key_row["id"]
-        lines.append((f"Ключ: {key_row['key_code']}", []))
-        lines.append((f"Ключ активирован: {timeutils.fmt_dt(key_row['activated_at'])}", []))
-        broadcasts = await database.list_broadcasts(key_row["id"])
-        lines.append((f"Рассылок: {len(broadcasts)}", []))
-        for b in broadcasts:
-            mark = "🟢" if b["is_active"] else "⚪️"
-            lines.append((f"  {mark} {b['title']} (интервал {b['interval_hours']} ч.)", []))
+@router.callback_query(F.data.startswith("a:gd:"))
+async def group_delete_ask(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    gid = int(call.data.split(":")[2])
+    await show(call, "Удалить группу? Все посты, привязанные к ней, тоже удалятся.",
+               kb([[("🗑 Да, удалить", f"a:gdc:{gid}")], [("⬅️ Отмена", f"a:g:{gid}")]]))
+
+
+@router.callback_query(F.data.startswith("a:gdc:"))
+async def group_delete(call: CallbackQuery) -> None:
+    if await _need(call, True):
+        await db.delete_group(int(call.data.split(":")[2]))
+        await groups(call)
+
+
+@router.callback_query(F.data == "a:ga")
+async def group_add(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _need(call, True):
+        return
+    await state.set_state(AdminStates.add_group)
+    await show(call, "Пришлите ID чата (для супергрупп и каналов он вида <code>-1001234567890</code>). "
+                     "Бот должен уже быть в нём админом.", kb([[("⬅️ Отмена", "a:groups")]]))
+
+
+@router.message(AdminStates.add_group)
+async def group_add_msg(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not await _need(message, True):
+        return
+    try:
+        chat_id = int((message.text or "").strip())
+        chat = await bot.get_chat(chat_id)
+        member = await bot.get_chat_member(chat_id, bot.id)
+    except Exception:
+        await message.answer("Не нашёл такой чат или бота в нём нет. Проверьте ID и права бота.")
+        return
+    await state.clear()
+    gid = await db.add_group(chat_id, chat.title, active=True)
+    warn = "" if member.status == "administrator" else "\n⚠️ Бот не админ, писать он, возможно, не сможет."
+    await message.answer(f"✅ Группа «{esc(chat.title)}» добавлена и включена.{warn}",
+                         reply_markup=kb([[("К группе", f"a:g:{gid}")]]))
+
+
+# ---------- заявки на зеркала ----------
+
+@router.callback_query(F.data == "a:apps")
+async def apps_list(call: CallbackQuery) -> None:
+    if not await _need(call):
+        return
+    items = await db.list_applications()
+    rows = []
+    for a in items:
+        user = await db.get_user(a["user_id"])
+        name = (user["full_name"] if user and user["full_name"] else str(a["user_id"]))
+        rows.append([(f"📥 {name} · @{a['username']}", f"a:apo:{a['user_id']}")])
+    rows.append([("⬅️ Назад", "a:menu")])
+    await show(call, f"📥 <b>Заявки на зеркала</b>: {len(items)}" if items else "Заявок нет.", kb(rows))
+
+
+@router.callback_query(F.data.startswith("a:apo:"))
+async def app_open(call: CallbackQuery) -> None:
+    if not await _need(call):
+        return
+    uid = int(call.data.split(":")[2])
+    app = await db.get_application(uid)
+    if not app:
+        await call.answer("Заявка уже обработана", show_alert=True)
+        await apps_list(call)
+        return
+    await show(call, applications.card_text(app, await db.get_user(uid)),
+               applications.card_buttons(uid))
+
+
+@router.callback_query(F.data.startswith("a:ap:"))
+async def app_approve(call: CallbackQuery, bot: Bot, manager) -> None:
+    if not await _need(call):
+        return
+    uid = int(call.data.split(":")[2])
+    name = await applications.approve(bot, manager, uid)
+    who = esc(call.from_user.full_name)
+    if name is None:
+        await show(call, "Эта заявка уже обработана или истекла.")
+        return
+    await show(call, f"✅ Заявка {user_link(uid)} на @{esc(name)} принята ({who}).")
+
+
+@router.callback_query(F.data.startswith("a:ar:"))
+async def app_reject(call: CallbackQuery, bot: Bot) -> None:
+    if not await _need(call):
+        return
+    uid = int(call.data.split(":")[2])
+    ok = await applications.reject(bot, uid)
+    who = esc(call.from_user.full_name)
+    await show(call, f"❌ Заявка {user_link(uid)} отклонена ({who}), токен удалён."
+               if ok else "Эта заявка уже обработана или истекла.")
+
+
+# ---------- зеркала ----------
+
+@router.callback_query(F.data.startswith("a:mirrors:"))
+async def mirrors(call: CallbackQuery) -> None:
+    await _mirrors_screen(call, int(call.data.split(":")[2]))
+
+
+async def _mirrors_screen(call: CallbackQuery, page: int) -> None:
+    if not await _need(call):
+        return
+    total = await db.count_mirrors()
+    items = await db.list_mirrors(page * PAGE, PAGE)
+    rows = [[(f"{STATUS_ICON[m['status']]} @{m['username']} · {m['owner_id']}", f"a:m:{m['id']}")]
+            for m in items]
+    nav = []
+    if page > 0:
+        nav.append(("⬅️", f"a:mirrors:{page - 1}"))
+    if (page + 1) * PAGE < total:
+        nav.append(("➡️", f"a:mirrors:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("⬅️ Назад", "a:menu")])
+    await show(call, f"🪞 <b>Зеркала</b>: {total}" if total else "Зеркал пока нет.", kb(rows))
+
+
+async def _mirror_card(call: CallbackQuery, mid: int, role: str) -> None:
+    m = await db.get_mirror(mid)
+    if not m:
+        await call.answer("Зеркало не найдено", show_alert=True)
+        return
+    st = await db.mirror_stats(mid)
+    admins = await db.list_mirror_admins(mid)
+    text = (f"{STATUS_ICON[m['status']]} <b>@{esc(m['username'])}</b>\n"
+            f"Владелец: {user_link(m['owner_id'])} (<code>{m['owner_id']}</code>)\n"
+            f"Админов: {len(admins)}\nСтатус: {STATUS_TEXT[m['status']]}\n"
+            f"Слоты: {st['posts']}/{m['slots']} (потолок {config.MAX_SLOTS})\n"
+            f"Отправок: {st['sent']}, ошибок: {st['errors']}\nСоздано: {fmt_dt(m['created_at'])}")
+    rows = []
+    if role == "owner":
+        rows.append([("➖ слот", f"a:ms:{mid}:-1"), ("➕ слот", f"a:ms:{mid}:1")])
+    if m["status"] in ("active",):
+        rows.append([("⏸ Пауза", f"a:mp:{mid}"), ("⛔ Заблокировать", f"a:mb:{mid}")])
+    elif m["status"] in ("paused", "blocked"):
+        rows.append([("▶️ Включить", f"a:mp:{mid}")])
+    if role == "owner":
+        rows.append([("🗑 Удалить зеркало", f"a:md:{mid}")])
+    rows.append([("⬅️ К зеркалам", "a:mirrors:0")])
+    await show(call, text, kb(rows))
+
+
+@router.callback_query(F.data.startswith("a:m:"))
+async def mirror_open(call: CallbackQuery) -> None:
+    role = await _need(call)
+    if role:
+        await _mirror_card(call, int(call.data.split(":")[2]), role)
+
+
+@router.callback_query(F.data.startswith("a:ms:"))
+async def mirror_slots(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    _, _, mid, delta = call.data.split(":")
+    m = await db.get_mirror(int(mid))
+    if m:
+        new = await db.set_mirror_slots(m["id"], m["slots"] + int(delta))
+        await call.answer(f"Слотов: {new}")
+    await _mirror_card(call, int(mid), "owner")
+
+
+@router.callback_query(F.data.startswith("a:mp:"))
+async def mirror_pause(call: CallbackQuery) -> None:
+    role = await _need(call)
+    if not role:
+        return
+    mid = int(call.data.split(":")[2])
+    m = await db.get_mirror(mid)
+    if m:
+        await db.set_mirror_status(mid, "paused" if m["status"] == "active" else "active")
+    await _mirror_card(call, mid, role)
+
+
+@router.callback_query(F.data.startswith("a:mb:"))
+async def mirror_block(call: CallbackQuery, manager) -> None:
+    role = await _need(call)
+    if not role:
+        return
+    mid = int(call.data.split(":")[2])
+    await db.set_mirror_status(mid, "blocked")
+    await manager.notify_staff(mid, "⛔ Доступ к рассылке ограничен владельцами сети.")
+    await _mirror_card(call, mid, role)
+
+
+@router.callback_query(F.data.startswith("a:md:"))
+async def mirror_delete_ask(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    mid = int(call.data.split(":")[2])
+    await show(call, "Удалить зеркало и все его посты? Сам бот в Telegram останется у владельца.",
+               kb([[("🗑 Да, удалить", f"a:mdc:{mid}")], [("⬅️ Отмена", f"a:m:{mid}")]]))
+
+
+@router.callback_query(F.data.startswith("a:mdc:"))
+async def mirror_delete(call: CallbackQuery, manager) -> None:
+    if not await _need(call, True):
+        return
+    mid = int(call.data.split(":")[2])
+    await manager.stop(mid)
+    await db.delete_mirror(mid)
+    await call.answer("Удалено")
+    await _mirrors_screen(call, 0)
+
+
+# ---------- модерация постов ----------
+
+@router.callback_query(F.data.startswith("a:ok:") | F.data.startswith("a:no:"))
+async def moderate(call: CallbackQuery, manager) -> None:
+    if not await _need(call):
+        return
+    _, action, pid = call.data.split(":")
+    post = await db.get_post(int(pid))
+    if not post or post["status"] != "pending":
+        await show(call, "Этот пост уже обработан или удалён.")
+        return
+    if action == "ok":
+        await db.set_post_status(post["id"], "active")
+        await manager.notify_staff(post["mirror_id"], f"✅ Пост «{post['title']}» одобрен, рассылка запущена.")
+        await show(call, f"✅ Пост #{pid} одобрен.")
     else:
-        lines.append(("Активированного ключа нет.", []))
-    text, all_entities = mentions.join_lines(lines)
-    kb = keyboards.user_card_kb(user_id, banned, key_id, broadcasts)
-    return text, all_entities, kb
+        await db.delete_post(post["id"])
+        await manager.notify_staff(post["mirror_id"], f"❌ Пост «{post['title']}» отклонён.")
+        await show(call, f"❌ Пост #{pid} отклонён и удалён.")
 
 
-@router.callback_query(F.data.startswith("adm_user_open:"))
-async def cb_adm_user_open(call: CallbackQuery) -> None:
-    user_id = int(call.data.split(":")[1])
-    text, entities, kb = await _build_user_card(user_id)
-    await call.message.edit_text(text, entities=entities, parse_mode=None, reply_markup=kb)
-    await call.answer()
+# ---------- пользователи и баны ----------
+
+@router.callback_query(F.data == "a:users")
+async def users(call: CallbackQuery, state: FSMContext) -> None:
+    if not await _need(call):
+        return
+    await state.set_state(AdminStates.user_search)
+    await show(call, "Пришлите ID пользователя или перешлите его сообщение.",
+               kb([[("⬅️ Назад", "a:menu")]]))
 
 
-@router.callback_query(F.data.startswith("adm_user_preview:"))
-async def cb_adm_user_preview(call: CallbackQuery, bot: Bot) -> None:
-    broadcast_id = int(call.data.split(":")[1])
-    broadcast = await database.get_broadcast(broadcast_id)
-    if not broadcast or not broadcast["source_message_id"]:
-        return await call.answer("Пост этой рассылки не найден (возможно, рассылка удалена).", show_alert=True)
-    try:
-        # copy_message, а не forward_message - визуально то же самое (для
-        # проверки контента разница не важна), но, в отличие от форварда,
-        # поддерживает reply_markup: можно повесить кнопку "Закрыть", чтобы
-        # превью не зависало в чате навсегда после возврата в меню.
-        await bot.copy_message(
-            chat_id=call.message.chat.id,
-            from_chat_id=broadcast["source_chat_id"],
-            message_id=broadcast["source_message_id"],
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🗑 Закрыть", callback_data="adm_close_msg")],
-            ]),
-        )
-    except Exception:
-        return await call.answer("Не удалось скопировать пост - возможно, исходное сообщение удалено.", show_alert=True)
-    await call.answer()
+async def _user_card(target, uid: int) -> None:
+    u = await db.get_user(uid)
+    mirror = await db.mirror_for_staff(uid)
+    banned = bool(u and u["is_banned"])
+    text = (f"👤 {user_link(uid, u['full_name'] if u else None)}\n"
+            f"ID: <code>{uid}</code>\nUsername: @{esc(u['username']) if u else '—'}\n"
+            f"Статус: {'⛔ в бане' if banned else '✅ активен'}\n"
+            f"Зеркало: {'@' + esc(mirror['username']) if mirror else '—'}")
+    btn = ("✅ Разбанить", f"a:uu:{uid}") if banned else ("⛔ Забанить", f"a:ub:{uid}")
+    await show(target, text, kb([[btn], [("⬅️ Назад", "a:menu")]]))
 
 
-@router.callback_query(F.data == "adm_close_msg")
-async def cb_adm_close_msg(call: CallbackQuery) -> None:
-    """Общая кнопка "Закрыть" под сообщениями, которые бот не может
-    редактировать кнопками меню (превью поста и т.п. - отдельные сообщения,
-    а не то, что открыто через edit_text)."""
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("adm_user_stop_all:"))
-async def cb_adm_user_stop_all(call: CallbackQuery) -> None:
-    """Выключает все рассылки пользователя, ключ не трогает - в отличие от
-    отзыва ключа, владелец не теряет доступ и может включить их заново сам."""
-    _, user_id, key_id = call.data.split(":")
-    user_id, key_id = int(user_id), int(key_id)
-    stopped = await database.deactivate_all_broadcasts(key_id)
-    await call.answer(f"⏸ Остановлено рассылок: {stopped}. Ключ остался активным.", show_alert=True)
-    text, entities, kb = await _build_user_card(user_id)
-    await call.message.edit_text(text, entities=entities, parse_mode=None, reply_markup=kb)
-
-
-@router.callback_query(F.data.startswith("adm_user_revoke:"))
-async def cb_adm_user_revoke(call: CallbackQuery) -> None:
-    _, user_id, key_id = call.data.split(":")
-    user_id, key_id = int(user_id), int(key_id)
-    await database.delete_key(key_id)
-    await call.answer("🗑 Ключ отозван, рассылки удалены. Ключ больше недействителен.", show_alert=True)
-    text, entities, kb = await _build_user_card(user_id)
-    await call.message.edit_text(text, entities=entities, parse_mode=None, reply_markup=kb)
-
-
-@router.callback_query(F.data.startswith("adm_ban:"))
-async def cb_adm_ban(call: CallbackQuery) -> None:
-    user_id = int(call.data.split(":")[1])
-    await database.ban_user(user_id)
-    await call.answer(await database.t("ADMIN_USER_BANNED", user_id=user_id), show_alert=True)
-    text, entities, kb = await _build_user_card(user_id)
-    await call.message.edit_text(text, entities=entities, parse_mode=None, reply_markup=kb)
-
-
-@router.callback_query(F.data.startswith("adm_unban:"))
-async def cb_adm_unban(call: CallbackQuery) -> None:
-    user_id = int(call.data.split(":")[1])
-    await database.unban_user(user_id)
-    await call.answer(await database.t("ADMIN_USER_UNBANNED", user_id=user_id), show_alert=True)
-    text, entities, kb = await _build_user_card(user_id)
-    await call.message.edit_text(text, entities=entities, parse_mode=None, reply_markup=kb)
-
-
-# ---------- обычная рассылка владельца (не форвард) ----------
-
-@router.callback_query(F.data == "adm_broadcast")
-async def cb_adm_broadcast(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(OwnerBroadcastStates.waiting_post)
-    await call.message.edit_text(
-        "Пришлите пост (текст/фото + при желании кнопки с Premium Emoji) - "
-        "он будет отправлен в целевой(е) чат(ы) один раз, сейчас.",
-        reply_markup=keyboards.back_to_admin_kb(),
-    )
-    await call.answer()
-
-
-@router.message(OwnerBroadcastStates.waiting_post, IsAdmin())
-async def msg_owner_broadcast(message: Message, state: FSMContext) -> None:
+@router.message(AdminStates.user_search)
+async def user_search_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message):
+        return
+    uid = None
+    origin = message.forward_origin
+    if origin is not None and getattr(origin, "type", "") == "user":
+        uid = origin.sender_user.id
+    elif (message.text or "").strip().isdigit():
+        uid = int(message.text.strip())
+    if uid is None:
+        await message.answer("Нужен числовой ID или пересланное сообщение.")
+        return
     await state.clear()
-    targets = await database.list_target_chats()
-    if not targets:
-        return await message.answer("⚠️ Целевой чат не задан. Сначала укажите его в разделе \"Целевой чат\".")
-    sent = 0
-    for target in targets:
-        try:
-            await message.copy_to(target["chat_id"])
-            sent += 1
-        except Exception:
-            pass
-    await message.answer(f"✅ Отправлено в {sent} чат(ов).")
+    await _user_card(message, uid)
+
+
+@router.callback_query(F.data.startswith("a:ub:"))
+async def user_ban(call: CallbackQuery, manager) -> None:
+    if not await _need(call):
+        return
+    uid = int(call.data.split(":")[2])
+    if await db.get_role(uid):
+        await call.answer("Владельцев и модераторов банить нельзя", show_alert=True)
+        return
+    await db.ban_user(uid)
+    mirror = await db.get_mirror_by_owner(uid)
+    if mirror:
+        await manager.notify_staff(mirror["id"], "⛔ Доступ к рассылке ограничен владельцами сети.")
+    await _user_card(call, uid)
+
+
+@router.callback_query(F.data.startswith("a:uu:"))
+async def user_unban(call: CallbackQuery) -> None:
+    if not await _need(call):
+        return
+    uid = int(call.data.split(":")[2])
+    await db.unban_user(uid)
+    await _user_card(call, uid)
 
 
 # ---------- статистика ----------
 
-@router.callback_query(F.data == "adm_stats")
-async def cb_adm_stats(call: CallbackQuery) -> None:
-    stats = await database.overall_stats()
+@router.callback_query(F.data == "a:stats")
+async def stats(call: CallbackQuery) -> None:
+    if not await _need(call):
+        return
+    s = await db.overall_stats()
     lines = [
-        "📊 Статистика",
-        "",
-        f"🔑 Ключей всего: {stats['total_keys']} (активировано: {stats['activated_keys']})",
-        f"👤 Пользователей: {stats['total_users']}",
-        f"📣 Активных рассылок: {stats['active_broadcasts']}",
-        f"🎯 Целевых чатов: {stats['active_chats']}",
-        f"📨 Отправлено всего: {stats['total_sent']} (сегодня: {stats['sent_today']})",
-        f"⚠️ Ошибок отправки: {stats['total_errors']}",
+        "📊 <b>Статистика</b>\n",
+        f"Зеркал: {s['mirrors']} (активных {s['mirrors_active']})",
+        f"Постов в эфире: {s['posts_active']}, на модерации: {s['posts_pending']}",
+        f"Пользователей: {s['users']}, в бане: {s['banned']}",
+        f"За 24 ч: отправок {s['sent_24h']}, ошибок {s['errors_24h']}",
     ]
-    await call.message.edit_text("\n".join(lines), reply_markup=keyboards.stats_kb())
-    await call.answer()
-
-
-@router.callback_query(F.data == "adm_stats_errors")
-async def cb_adm_stats_errors(call: CallbackQuery) -> None:
-    errors = await database.recent_send_errors(limit=10)
-    if not errors:
-        text = "Ошибок отправки не было. 🎉"
-    else:
-        lines = ["⚠️ Последние ошибки отправки:"]
+    errors = await db.recent_errors(5)
+    if errors:
+        lines.append("\nПоследние ошибки:")
         for e in errors:
-            lines.append(f"\n{timeutils.fmt_dt(e['occurred_at'])} - чат {e['chat_id']}\n{e['error']}")
-        text = "\n".join(lines)
-    await call.message.edit_text(text, reply_markup=keyboards.back_to_admin_kb())
-    await call.answer()
+            lines.append(f"• {fmt_dt(e['sent_at'])}: {esc(e['error'])}")
+    await show(call, "\n".join(lines), kb([[("⬅️ Назад", "a:menu")]]))
 
 
-# ---------- бэкап баз ----------
+# ---------- настройки ----------
 
-@router.callback_query(F.data == "adm_backup")
-async def cb_adm_backup(call: CallbackQuery) -> None:
-    await call.answer("Собираю файлы…")
-    await _send_backup(call.message)
-
-
-@router.message(Command("backup"))
-async def cmd_backup(message: Message) -> None:
-    await _send_backup(message)
-
-
-async def _send_backup(message: Message) -> None:
-    import os
-    if os.path.exists(config.DB_PATH):
-        await message.answer_document(
-            FSInputFile(config.DB_PATH), caption="📦 adbot.db - операционные данные (ключи, рассылки, статистика)"
-        )
-    if os.path.exists(config.CONTENT_DB_PATH):
-        await message.answer_document(
-            FSInputFile(config.CONTENT_DB_PATH), caption="🎨 content.db - тексты и оформление кнопок (/admin1)"
-        )
+@router.callback_query(F.data == "a:set")
+async def settings(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not await _need(call, True):
+        return
+    gi = await db.global_interval()
+    mod = await db.moderation_on()
+    slots = await db.get_setting("default_slots", str(config.DEFAULT_SLOTS))
+    sw = await db.get_setting("stopwords", "") or "—"
+    text = (f"⚙️ <b>Настройки</b>\n\nОбщий интервал: {fmt_interval(gi)}\n"
+            f"Модерация постов: {'включена' if mod else 'выключена'}\n"
+            f"Слотов у новых зеркал: {slots}\nСтоп-слова: {esc(sw)}")
+    await show(call, text, kb([
+        [("⏱ Общий интервал", "a:si")],
+        [(f"🛡 Модерация: {'выключить' if mod else 'включить'}", "a:smod")],
+        [("🎟 Слоты по умолчанию", "a:ssl")],
+        [("🚫 Стоп-слова", "a:sw")],
+        [("⬅️ Назад", "a:menu")],
+    ]))
 
 
-# ---------- /setpost: привязать к рассылке пост, который уже лежит в чате ----------
-
-# ссылка на сообщение в супергруппе/канале: t.me/c/<id без -100>/<msg>
-# (в группах с топиками между ними ещё номер топика)
-_POST_LINK_RE = re.compile(r"t\.me/c/(\d+)/(?:\d+/)?(\d+)")
-
-_SETPOST_USAGE = (
-    "Формат:\n"
-    "/setpost ID_РАССЫЛКИ ССЫЛКА_НА_ПОСТ [on]\n\n"
-    "Ссылка: в целевом чате нажми на пост -> «Копировать ссылку». "
-    "Вместо ссылки можно указать просто номер сообщения (берётся первый целевой чат).\n"
-    "«on» в конце - сразу включить рассылку."
-)
+@router.callback_query(F.data == "a:smod")
+async def set_moderation(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await db.set_setting("moderation", "0" if await db.moderation_on() else "1")
+        await settings(call, state)
 
 
-def _parse_post_ref(ref: str) -> tuple[int | None, int | None]:
-    """(chat_id или None, message_id или None). chat_id=None - значит
-    «первый целевой чат», message_id=None - не распознали."""
-    m = _POST_LINK_RE.search(ref)
-    if m:
-        return int("-100" + m.group(1)), int(m.group(2))
-    if ref.isdigit():
-        return None, int(ref)
-    return None, None
+@router.callback_query(F.data == "a:si")
+async def set_interval(call: CallbackQuery) -> None:
+    if not await _need(call, True):
+        return
+    presets = [30, 60, 120, 180, 360, 720]
+    rows = [[(fmt_interval(m), f"a:sip:{m}") for m in presets[i:i + 3]] for i in (0, 3)]
+    rows.append([("✏️ Свой", "a:sic")])
+    rows.append([("⬅️ Назад", "a:set")])
+    await show(call, "⏱ Общий интервал рассылки. Применяется к группам без своего интервала.", kb(rows))
 
 
-@router.message(Command("setpost"))
-async def cmd_setpost(message: Message, command: CommandObject, bot: Bot) -> None:
-    """Админ привязывает к существующей рассылке пост, который бот уже
-    когда-то отправил в целевой чат (нужно после смены бота: пересылка из
-    ЛС старого бота больше недоступна, а сами посты в чате остались).
+@router.callback_query(F.data.startswith("a:sip:"))
+async def set_interval_preset(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await db.set_setting("interval_minutes", str(max(int(call.data.split(":")[2]), config.MIN_INTERVAL_MINUTES)))
+        await settings(call, state)
 
-    Бот не умеет читать историю чата, поэтому пост указывает админ - ссылкой
-    или номером сообщения. Бот пересылает его в канал-хранилище (если задан
-    config.STORAGE_CHAT_ID) и запоминает уже ссылку на копию там, а также
-    показывает пересланный пост админу - для проверки, что взят нужный."""
-    args = (command.args or "").split()
-    if len(args) < 2 or not args[0].isdigit():
-        return await message.answer(_SETPOST_USAGE)
 
-    broadcast = await database.get_broadcast(int(args[0]))
-    if not broadcast:
-        return await message.answer("Рассылки с таким id нет.")
+@router.callback_query(F.data == "a:sic")
+async def set_interval_custom(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.global_interval)
+        await show(call, "Пришлите интервал в минутах числом.", kb([[("⬅️ Отмена", "a:set")]]))
 
-    src_chat, src_msg = _parse_post_ref(args[1])
-    if src_msg is None:
-        return await message.answer(_SETPOST_USAGE)
-    if src_chat is None:
-        targets = await database.list_target_chats()
-        if not targets:
-            return await message.answer("Целевой чат не задан - укажите ссылку на пост целиком.")
-        src_chat = targets[0]["chat_id"]
 
-    storage_id = getattr(config, "STORAGE_CHAT_ID", None)
-    try:
-        # показываем админу, какой именно пост взяли (заодно проверка доступа)
-        await bot.forward_message(chat_id=message.chat.id, from_chat_id=src_chat, message_id=src_msg)
-        if storage_id:
-            saved = await bot.forward_message(
-                chat_id=storage_id, from_chat_id=src_chat, message_id=src_msg
-            )
-            post_chat, post_msg = storage_id, saved.message_id
-        else:
-            post_chat, post_msg = src_chat, src_msg
-    except Exception as exc:
-        return await message.answer(
-            f"❌ Не удалось взять сообщение {src_msg} из чата {src_chat}:\n{html.escape(str(exc))}"
-        )
+@router.message(AdminStates.global_interval)
+async def set_interval_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    if not (message.text or "").strip().isdigit():
+        await message.answer("Нужно число минут.")
+        return
+    await state.clear()
+    await db.set_setting("interval_minutes", str(max(int(message.text), config.MIN_INTERVAL_MINUTES)))
+    await message.answer("✅ Сохранено.", reply_markup=kb([[("К настройкам", "a:set")]]))
 
-    await database.set_broadcast_post(broadcast["id"], post_chat, post_msg)
-    turned_on = len(args) > 2 and args[2].lower() == "on"
-    if turned_on:
-        # next_send_at остаётся пустым -> планировщик отправит на ближайшем тике
-        await database.toggle_broadcast(broadcast["id"], True)
-    await message.answer(
-        f"✅ Пост привязан к рассылке #{broadcast['id']} «{html.escape(broadcast['title'])}». "
-        + ("Рассылка включена - уйдёт в течение ~30 секунд." if turned_on
-           else "Рассылка не включена (добавьте «on» в конце команды или включит владелец).")
+
+@router.callback_query(F.data == "a:ssl")
+async def set_slots(call: CallbackQuery) -> None:
+    if await _need(call, True):
+        rows = [[(str(n), f"a:ssn:{n}") for n in range(1, 6)], [(str(n), f"a:ssn:{n}") for n in range(6, 11)]]
+        rows.append([("⬅️ Назад", "a:set")])
+        await show(call, "🎟 Сколько постов на один токен у новых зеркал. "
+                         "Существующим слоты меняются в карточке зеркала.", kb(rows))
+
+
+@router.callback_query(F.data.startswith("a:ssn:"))
+async def set_slots_value(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        n = max(1, min(int(call.data.split(":")[2]), config.MAX_SLOTS))
+        await db.set_setting("default_slots", str(n))
+        await settings(call, state)
+
+
+@router.callback_query(F.data == "a:sw")
+async def stopwords(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.stopwords)
+        await show(call, "Пришлите стоп-слова через запятую. Посты с ними не принимаются. "
+                         "Знак «-» очищает список.", kb([[("⬅️ Отмена", "a:set")]]))
+
+
+@router.message(AdminStates.stopwords)
+async def stopwords_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    value = (message.text or "").strip()
+    await state.clear()
+    await db.set_setting("stopwords", "" if value == "-" else value)
+    await message.answer("✅ Сохранено.", reply_markup=kb([[("К настройкам", "a:set")]]))
+
+
+# ---------- владельцы ----------
+
+@router.callback_query(F.data == "a:owners")
+async def owners(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not await _need(call, True):
+        return
+    rows, lines = [], ["👑 <b>Владельцы и модераторы</b>\n"]
+    for o in await db.list_owners():
+        role = "владелец" if o["role"] == "owner" else "модератор"
+        lines.append(f"• {user_link(o['user_id'])} · {role}")
+        if o["user_id"] not in config.OWNER_IDS:
+            rows.append([(f"❌ Убрать {o['user_id']}", f"a:odel:{o['user_id']}")])
+    rows.append([("➕ Добавить", "a:oadd")])
+    rows.append([("⬅️ Назад", "a:menu")])
+    await show(call, "\n".join(lines), kb(rows))
+
+
+@router.callback_query(F.data == "a:oadd")
+async def owner_add(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.add_owner)
+        await show(call, "Пришлите ID или перешлите сообщение человека.", kb([[("⬅️ Отмена", "a:owners")]]))
+
+
+@router.message(AdminStates.add_owner)
+async def owner_add_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    uid = None
+    origin = message.forward_origin
+    if origin is not None and getattr(origin, "type", "") == "user":
+        uid = origin.sender_user.id
+    elif (message.text or "").strip().isdigit():
+        uid = int(message.text.strip())
+    if uid is None:
+        await message.answer("Нужен числовой ID или пересланное сообщение.")
+        return
+    await state.clear()
+    await message.answer(f"Какую роль дать {uid}?", reply_markup=kb([
+        [("👑 Владелец", f"a:oadr:{uid}:owner"), ("🛡 Модератор", f"a:oadr:{uid}:moderator")],
+        [("⬅️ Отмена", "a:owners")]]))
+
+
+@router.callback_query(F.data.startswith("a:oadr:"))
+async def owner_add_role(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        _, _, uid, role = call.data.split(":")
+        await db.add_owner(int(uid), role)
+        await owners(call, state)
+
+
+@router.callback_query(F.data.startswith("a:odel:"))
+async def owner_del(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        uid = int(call.data.split(":")[2])
+        if uid == call.from_user.id:
+            await call.answer("Себя убрать нельзя", show_alert=True)
+            return
+        await db.remove_owner(uid)
+        await owners(call, state)
+
+
+# ---------- рассылка ----------
+
+@router.callback_query(F.data == "a:bc")
+async def broadcast(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if await _need(call, True):
+        await show(call, "📢 <b>Рассылка</b>\nКому отправить?", kb([
+            [("👤 Пользователям основного бота", "a:bca:users")],
+            [("🪞 Владельцам и админам зеркал", "a:bca:mirrors")],
+            [("📣 Всем сразу", "a:bca:all")],
+            [("🔁 Сообщить о смене основного бота", "a:newmain")],
+            [("⬅️ Назад", "a:menu")],
+        ]))
+
+
+@router.callback_query(F.data.startswith("a:bca:"))
+async def broadcast_audience(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.bc_wait)
+        await state.update_data(audience=call.data.split(":")[2])
+        await show(call, "Пришлите сообщение для рассылки. Пользователям уйдёт как есть, "
+                         "зеркалам только текст.", kb([[("⬅️ Отмена", "a:bc")]]))
+
+
+@router.message(AdminStates.bc_wait)
+async def broadcast_message(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    entities = message.entities or message.caption_entities or []
+    await state.update_data(
+        chat_id=message.chat.id, message_id=message.message_id,
+        text=message.text or message.caption or "",
+        entities=[e.model_dump(exclude_none=True) for e in entities],
     )
+    await state.set_state(AdminStates.bc_confirm)
+    await message.answer("Отправить это сообщение?", reply_markup=kb([
+        [("✅ Отправить", "a:bcgo")], [("✖️ Отмена", "a:bc")]]))
+
+
+@router.callback_query(F.data == "a:bcgo", AdminStates.bc_confirm)
+async def broadcast_go(call: CallbackQuery, state: FSMContext, bot: Bot, manager) -> None:
+    if not await _need(call, True):
+        return
+    data = await state.get_data()
+    await state.clear()
+    await call.answer("Отправляю…")
+    await show(call, "⏳ Рассылка идёт…")
+    ok_u = fail_u = ok_m = fail_m = 0
+    audience = data["audience"]
+    if audience in ("users", "all"):
+        for uid in await db.list_user_ids():
+            try:
+                await bot.copy_message(uid, data["chat_id"], data["message_id"])
+                ok_u += 1
+            except Exception:
+                fail_u += 1
+            await asyncio.sleep(0.05)
+    if audience in ("mirrors", "all") and data.get("text"):
+        entities = [MessageEntity.model_validate(e) for e in data["entities"]] or None
+        ok_m, fail_m = await manager.broadcast_staff(data["text"], entities)
+    await call.message.answer(
+        f"✅ Готово.\nПользователям: дошло {ok_u}, не дошло {fail_u}\n"
+        f"Зеркалам: дошло {ok_m}, не дошло {fail_m}",
+        reply_markup=kb([[("⬅️ В админку", "a:menu")]]))
+
+
+@router.callback_query(F.data == "a:newmain")
+async def new_main(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        await state.set_state(AdminStates.newmain)
+        await show(call, "Пришлите юзернейм нового основного бота, например <code>@new_ads_bot</code>. "
+                         "Зеркалам уйдёт уведомление.", kb([[("⬅️ Отмена", "a:bc")]]))
+
+
+@router.message(AdminStates.newmain)
+async def new_main_msg(message: Message, state: FSMContext) -> None:
+    if not await _need(message, True):
+        return
+    name = (message.text or "").strip().lstrip("@")
+    if not name.lower().endswith("bot") or " " in name:
+        await message.answer("Юзернейм бота заканчивается на bot, например @new_ads_bot.")
+        return
+    text = (f"⚠️ Основной бот сменился. Новый: @{name}. Откройте его и нажмите /start. "
+            "Ваше зеркало и посты сохранены.")
+    await state.set_state(AdminStates.bc_confirm)
+    await state.update_data(audience="mirrors", chat_id=message.chat.id,
+                            message_id=message.message_id, text=text, entities=[])
+    await message.answer(f"Зеркалам уйдёт:\n\n{esc(text)}", reply_markup=kb([
+        [("✅ Отправить", "a:bcgo")], [("✖️ Отмена", "a:bc")]]))
+
+
+# ---------- бэкап ----------
+
+@router.callback_query(F.data == "a:bk")
+async def backup_menu(call: CallbackQuery) -> None:
+    if await _need(call, True):
+        where = "в канал бэкапов" if config.BACKUP_CHAT_ID else "вам в личку"
+        await show(call, f"💾 <b>Бэкап</b>\nФайл базы уйдёт {where}. Токены зеркал в нём "
+                         "зашифрованы, ключ шифрования в бэкап не входит.\n"
+                         f"Автоматически: раз в {config.BACKUP_EVERY_HOURS} ч.",
+                   kb([[("💾 Сделать сейчас", "a:bkgo")], [("⬅️ Назад", "a:menu")]]))
+
+
+@router.callback_query(F.data == "a:bkgo")
+async def backup_go(call: CallbackQuery, bot: Bot) -> None:
+    if not await _need(call, True):
+        return
+    await call.answer("Собираю…")
+    try:
+        await backup.send_backup(bot, config.BACKUP_CHAT_ID or call.from_user.id)
+        await call.message.answer("✅ Бэкап отправлен.")
+    except Exception as exc:
+        log.exception("Бэкап не удался")
+        await call.message.answer(f"⚠️ Бэкап не удался: {esc(exc)}")

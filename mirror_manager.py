@@ -1,0 +1,137 @@
+"""Запуск и остановка ботов-зеркал внутри одного процесса.
+
+У каждого зеркала свой Bot и свой Dispatcher с long polling: домен и HTTPS
+не нужны, работает из Docker как есть. Кабинет у всех зеркал одинаковый
+(mirror_cabinet.make_router), а какое именно зеркало отвечает, определяется
+по id бота.
+"""
+
+import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.fsm.storage.memory import MemoryStorage
+
+import crypto
+import db
+import mirror_cabinet
+from middlewares import GuardMiddleware
+
+log = logging.getLogger(__name__)
+
+
+class MirrorManager:
+    def __init__(self, main_bot: Bot):
+        self.main_bot = main_bot
+        self.bots: dict[int, Bot] = {}              # mirror_id -> Bot
+        self._tasks: dict[int, asyncio.Task] = {}   # mirror_id -> задача polling
+        self._dps: dict[int, Dispatcher] = {}
+
+    async def start_all(self) -> None:
+        for row in await db.list_runnable_mirrors():
+            await self.start(row)
+
+    async def start(self, mirror) -> None:
+        mid = mirror["id"]
+        if mid in self._tasks and not self._tasks[mid].done():
+            return
+        token = crypto.decrypt(mirror["token_enc"])
+        bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        dp = Dispatcher(storage=MemoryStorage(), main_bot=self.main_bot, mirror_id=mid, manager=self)
+        dp.update.outer_middleware(GuardMiddleware())
+        dp.include_router(mirror_cabinet.make_router())
+        self.bots[mid] = bot
+        self._dps[mid] = dp
+        self._tasks[mid] = asyncio.create_task(self._run(mid, bot, dp), name=f"mirror-{mid}")
+        log.info("Зеркало #%s запущено", mid)
+
+    async def stop(self, mirror_id: int) -> None:
+        dp = self._dps.pop(mirror_id, None)
+        task = self._tasks.pop(mirror_id, None)
+        bot = self.bots.pop(mirror_id, None)
+        if dp is not None:
+            try:
+                await dp.stop_polling()
+            except Exception:
+                pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if bot is not None:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+
+    async def stop_all(self) -> None:
+        for mid in list(self._tasks):
+            await self.stop(mid)
+
+    async def _run(self, mirror_id: int, bot: Bot, dp: Dispatcher) -> None:
+        delay = 5
+        while True:
+            try:
+                await dp.start_polling(
+                    bot, allowed_updates=["message", "callback_query"],
+                    handle_signals=False, close_bot_session=False,
+                )
+                return  # штатная остановка
+            except TelegramUnauthorizedError:
+                # токен отозван (бот удалён или токен перевыпущен)
+                await db.set_mirror_status(mirror_id, "revoked")
+                await db.pause_mirror_posts(mirror_id)
+                mirror = await db.get_mirror(mirror_id)
+                if mirror:
+                    await self._notify_main(
+                        mirror["owner_id"],
+                        "⚠️ Токен вашего зеркала отозван, зеркало отключено. "
+                        "Посты сохранены на паузе. Создайте зеркало заново или пришлите новый токен.",
+                    )
+                log.warning("Зеркало #%s: токен отозван", mirror_id)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Зеркало #%s упало, перезапуск через %s с", mirror_id, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 120)
+
+    async def _notify_main(self, user_id: int, text: str) -> None:
+        try:
+            await self.main_bot.send_message(user_id, text)
+        except Exception:
+            pass
+
+    async def notify_staff(self, mirror_id: int, text: str) -> None:
+        """Сообщение создателю и админам зеркала от имени самого зеркала.
+        Получат те, кто уже писал этому зеркалу."""
+        bot = self.bots.get(mirror_id)
+        if bot is None:
+            return
+        for uid in await db.mirror_staff_ids(mirror_id):
+            try:
+                await bot.send_message(uid, text)
+            except Exception:
+                pass
+
+    async def broadcast_staff(self, text: str, entities=None) -> tuple[int, int]:
+        """Текст всем создателям и админам всех зеркал. Возвращает (дошло, не дошло)."""
+        ok = fail = 0
+        for mirror in await db.list_runnable_mirrors():
+            bot = self.bots.get(mirror["id"])
+            if bot is None:
+                continue
+            for uid in await db.mirror_staff_ids(mirror["id"]):
+                try:
+                    await bot.send_message(uid, text, entities=entities, parse_mode=None)
+                    ok += 1
+                except Exception:
+                    fail += 1
+                await asyncio.sleep(0.05)
+        return ok, fail

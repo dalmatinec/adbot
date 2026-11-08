@@ -1,23 +1,16 @@
-"""
-Middleware, который на каждом апдейте (сообщение или нажатие кнопки)
-сохраняет ID/имя/username отправителя — чтобы потом показывать его как
-кликабельное имя (см. mentions.py), а не голый ID.
+"""Общий для основного бота и зеркал: запоминает пользователя и молча
+отбрасывает апдейты забаненных (владельцев это не касается)."""
 
-Подключается в bots.py ОДНОЙ строкой: setup_middlewares(dp).
-"""
+from aiogram import BaseMiddleware
 
-from aiogram import BaseMiddleware, Dispatcher
-
-import database
+import db
 
 
-class TrackUserMiddleware(BaseMiddleware):
+class GuardMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
-        if user is not None:
-            await database.upsert_seen_user(user.id, user.full_name, user.username)
+        if user is not None and not user.is_bot:
+            await db.touch_user(user.id, user.full_name, user.username)
+            if await db.is_banned(user.id) and await db.get_role(user.id) != "owner":
+                return None
         return await handler(event, data)
-
-
-def setup_middlewares(dp: Dispatcher) -> None:
-    dp.update.outer_middleware(TrackUserMiddleware())
