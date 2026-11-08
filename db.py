@@ -405,6 +405,20 @@ async def set_mirror_token(mirror_id: int, token_enc: str) -> None:
     )
 
 
+async def replace_mirror_bot(mirror_id: int, bot_id: int, username: str | None,
+                             token_enc: str) -> bool:
+    """Подменяет бота зеркала (старый удалён или токен отозван), посты и слоты
+    сохраняются. False, если этот бот уже занят другим зеркалом."""
+    try:
+        await execute(
+            "UPDATE mirrors SET bot_id=?, username=?, token_enc=?, status='active' WHERE id=?",
+            (bot_id, username, token_enc, mirror_id),
+        )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
 async def delete_mirror(mirror_id: int) -> None:
     await execute("DELETE FROM mirrors WHERE id=?", (mirror_id,))
 

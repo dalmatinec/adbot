@@ -20,11 +20,12 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 import applications
 import config
+import crypto
 import db
 import texts
 import tg_raw
 from notify import notify_owners
-from ui import esc, kb, show
+from ui import esc, kb, show, user_link
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -42,14 +43,26 @@ class UserStates(StatesGroup):
 async def _home(target: Message | CallbackQuery) -> None:
     uid = target.from_user.id
     mirror = await db.mirror_for_staff(uid)
+    app = await db.get_application(uid)
     rows = []
     if mirror:
-        text = f"Ваше зеркало: @{esc(mirror['username'])}\nНастройка рассылки выполняется в нём."
-        if mirror["username"]:
-            rows.append([("🪞 Открыть зеркало", f"https://t.me/{mirror['username']}")])
-    elif await db.get_application(uid):
+        is_owner = mirror["owner_id"] == uid
+        if mirror["status"] == "revoked" and is_owner:
+            text = (f"Токен зеркала @{esc(mirror['username'])} отозван, зеркало отключено. "
+                    "Посты сохранены и находятся на паузе.\n\n"
+                    "Создайте новое зеркало или отправьте токен нового бота: посты и слоты сохранятся.")
+            rows.append([("Создать новое зеркало", "m:create")])
+            rows.append([("Подключить бота по токену", "m:token")])
+        else:
+            text = f"Ваше зеркало: @{esc(mirror['username'])}\nНастройка рассылки выполняется в нём."
+            if mirror["username"]:
+                rows.append([("Открыть зеркало", f"https://t.me/{mirror['username']}")])
+        if is_owner:
+            rows.append([("Удалить зеркало", "m:del")])
+    elif app:
         text = ("Ваша заявка на зеркало находится на рассмотрении. Ответ будет направлен "
                 f"в этот чат в течение {config.APPLICATION_TTL_HOURS} ч.")
+        rows.append([("Отозвать заявку", "m:cancelapp")])
     else:
         text = texts.WELCOME
         rows.append([("🪞 Создать зеркало", "m:create")])
@@ -57,6 +70,15 @@ async def _home(target: Message | CallbackQuery) -> None:
     if await db.get_role(uid):
         rows.append([("⚙️ Админка", "a:menu")])
     await show(target, text, kb(rows))
+
+
+async def _blocked(user_id: int) -> bool:
+    """Нельзя создавать новое зеркало, если есть рабочее зеркало или заявка.
+    Отозванное зеркало (бот удалён) заменить можно."""
+    mirror = await db.get_mirror_by_owner(user_id)
+    if mirror and mirror["status"] != "revoked":
+        return True
+    return await db.get_application(user_id) is not None
 
 
 @router.message(CommandStart(), F.chat.type == "private")
@@ -77,11 +99,46 @@ async def home_cb(call: CallbackQuery, state: FSMContext) -> None:
     await _home(call)
 
 
+# ---------- удаление зеркала и отзыв заявки ----------
+
+@router.callback_query(F.data == "m:del")
+async def delete_ask(call: CallbackQuery) -> None:
+    mirror = await db.get_mirror_by_owner(call.from_user.id)
+    if not mirror:
+        await _home(call)
+        return
+    await show(call, (
+        f"Удалить зеркало @{esc(mirror['username'])}? Все его посты, слоты и статистика будут удалены. "
+        "Сам бот в Telegram останется, при необходимости удалите его через @BotFather. "
+        "После удаления можно создать новое зеркало (потребуется одобрение владельцев)."),
+        kb([[("Да, удалить", "m:delc")], [("Отмена", "m:home")]]))
+
+
+@router.callback_query(F.data == "m:delc")
+async def delete_do(call: CallbackQuery, bot: Bot, manager) -> None:
+    mirror = await db.get_mirror_by_owner(call.from_user.id)
+    if mirror:
+        await manager.stop(mirror["id"])
+        await db.delete_mirror(mirror["id"])
+        await notify_owners(
+            bot, f"Пользователь {user_link(call.from_user.id, call.from_user.full_name)} "
+                 f"удалил зеркало @{esc(mirror['username'])}.")
+    await _home(call)
+
+
+@router.callback_query(F.data == "m:cancelapp")
+async def cancel_application(call: CallbackQuery, bot: Bot, manager) -> None:
+    if await applications.reject(bot, call.from_user.id, "отозвана заявителем", manager=manager):
+        await notify_owners(
+            bot, f"Пользователь {user_link(call.from_user.id, call.from_user.full_name)} отозвал заявку на зеркало.")
+    await _home(call)
+
+
 # ---------- создание зеркала через Managed Bots ----------
 
 @router.callback_query(F.data == "m:create")
 async def create_mirror(call: CallbackQuery, bot: Bot) -> None:
-    if await db.get_mirror_by_owner(call.from_user.id) or await db.get_application(call.from_user.id):
+    if await _blocked(call.from_user.id):
         await call.answer("У вас уже есть зеркало или заявка", show_alert=True)
         await _home(call)
         return
@@ -121,9 +178,28 @@ async def register_managed_bot(bot: Bot, manager, mb: dict) -> None:
                          "Нажмите Подключить своего бота и отправьте токен из @BotFather.")
         await notify_owners(bot, f"Ошибка подключения зеркала {bot_id} пользователя {owner_id}: {esc(exc)}")
         return
+    if existing and existing["status"] == "revoked":
+        await _replace_mirror(bot, manager, existing, me, token)
+        return
     full_name = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or None
     await _submit(bot, manager, owner_id, me, token, "quick",
                   {"full_name": full_name, "username": user.get("username")})
+
+
+async def _replace_mirror(bot: Bot, manager, mirror, me: dict, token: str) -> None:
+    """Владелец уже одобрен ранее, поэтому новый бот взамен отозванного
+    подключается без повторной заявки. Посты остаются на паузе."""
+    if not await db.replace_mirror_bot(mirror["id"], me["id"], me.get("username"), crypto.encrypt(token)):
+        await _safe_send(bot, mirror["owner_id"], "Этот бот уже подключён к другому зеркалу.")
+        return
+    await manager.stop(mirror["id"])
+    await manager.start(await db.get_mirror(mirror["id"]))
+    await _safe_send(
+        bot, mirror["owner_id"],
+        f"Зеркало обновлено: @{esc(me.get('username'))}. Посты находятся на паузе, "
+        "возобновите их в кабинете зеркала.",
+        kb([[("Открыть зеркало", f"https://t.me/{me.get('username')}")]]))
+    await notify_owners(bot, f"Зеркало пользователя {mirror['owner_id']} заменено на @{esc(me.get('username'))}.")
 
 
 _SUBMIT_ERRORS = {
@@ -171,7 +247,7 @@ class MainDispatcher(Dispatcher):
 
 @router.callback_query(F.data == "m:token")
 async def token_start(call: CallbackQuery, state: FSMContext) -> None:
-    if await db.get_mirror_by_owner(call.from_user.id) or await db.get_application(call.from_user.id):
+    if await _blocked(call.from_user.id):
         await call.answer("У вас уже есть зеркало или заявка", show_alert=True)
         return
     await state.set_state(UserStates.waiting_token)
@@ -198,8 +274,12 @@ async def token_received(message: Message, state: FSMContext, bot: Bot, manager)
         await message.answer("Указан токен основного бота. Требуется токен отдельного бота.")
         return
     await state.clear()
-    await _submit(bot, manager, message.from_user.id, me, raw, "token",
-                  {"full_name": message.from_user.full_name, "username": message.from_user.username})
+    existing = await db.get_mirror_by_owner(message.from_user.id)
+    if existing and existing["status"] == "revoked":
+        await _replace_mirror(bot, manager, existing, me, raw)
+    else:
+        await _submit(bot, manager, message.from_user.id, me, raw, "token",
+                      {"full_name": message.from_user.full_name, "username": message.from_user.username})
     await _home(message)
 
 

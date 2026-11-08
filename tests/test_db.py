@@ -45,6 +45,13 @@ async def main() -> None:
     assert await db.set_mirror_slots(m1, 0) == 1
     await db.set_mirror_slots(m1, 3)
 
+    # замена бота отозванного зеркала: посты и слоты сохраняются, занятый бот не принимается
+    await db.set_mirror_status(m2, "revoked")
+    assert not await db.replace_mirror_bot(m2, 1001, "x_bot", "enc2")      # 1001 занят зеркалом m1
+    assert await db.replace_mirror_bot(m2, 1099, "new_bot", "enc2")
+    row = await db.get_mirror(m2)
+    assert row["bot_id"] == 1099 and row["status"] == "active" and row["owner_id"] == 11
+
     # группы и посты
     g = await db.add_group(-100500, "Чат", active=True)
     g2 = await db.add_group(-100501, "Чат 2", active=False)
