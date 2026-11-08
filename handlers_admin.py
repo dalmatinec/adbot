@@ -283,11 +283,11 @@ async def app_approve(call: CallbackQuery, bot: Bot, manager) -> None:
 
 
 @router.callback_query(F.data.startswith("a:ar:"))
-async def app_reject(call: CallbackQuery, bot: Bot) -> None:
+async def app_reject(call: CallbackQuery, bot: Bot, manager) -> None:
     if not await _need(call):
         return
     uid = int(call.data.split(":")[2])
-    ok = await applications.reject(bot, uid)
+    ok = await applications.reject(bot, uid, manager=manager)
     who = esc(call.from_user.full_name)
     await show(call, f"❌ Заявка {user_link(uid)} отклонена ({who}), токен удалён."
                if ok else "Эта заявка уже обработана или истекла.")

@@ -42,7 +42,7 @@ async def main() -> None:
     background = [
         asyncio.create_task(run_scheduler(bot), name="scheduler"),
         asyncio.create_task(backup.run_backups(bot), name="backups"),
-        asyncio.create_task(applications.run_expiry(bot), name="applications"),
+        asyncio.create_task(applications.run_expiry(bot, manager), name="applications"),
     ]
     try:
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)

@@ -97,7 +97,7 @@ async def create_mirror(call: CallbackQuery, bot: Bot) -> None:
     ]))
 
 
-async def register_managed_bot(bot: Bot, mb: dict) -> None:
+async def register_managed_bot(bot: Bot, manager, mb: dict) -> None:
     """Событие managed_bot: пользователь подтвердил создание зеркала.
     Бот не запускается сразу, а уходит в заявку владельцам."""
     user, bot_info = tg_raw.parse_managed_bot(mb)
@@ -122,7 +122,7 @@ async def register_managed_bot(bot: Bot, mb: dict) -> None:
         await notify_owners(bot, f"Ошибка подключения зеркала {bot_id} пользователя {owner_id}: {esc(exc)}")
         return
     full_name = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x) or None
-    await _submit(bot, owner_id, me, token, "quick",
+    await _submit(bot, manager, owner_id, me, token, "quick",
                   {"full_name": full_name, "username": user.get("username")})
 
 
@@ -133,9 +133,9 @@ _SUBMIT_ERRORS = {
 }
 
 
-async def _submit(bot: Bot, owner_id: int, me: dict, token: str, source: str,
+async def _submit(bot: Bot, manager, owner_id: int, me: dict, token: str, source: str,
                   user_info: dict | None = None) -> bool:
-    result = await applications.submit(bot, owner_id, me, token, source, user_info)
+    result = await applications.submit(bot, manager, owner_id, me, token, source, user_info)
     if result != "ok":
         await _safe_send(bot, owner_id, _SUBMIT_ERRORS[result])
     return result == "ok"
@@ -160,7 +160,7 @@ class MainDispatcher(Dispatcher):
             if hasattr(mb, "model_dump"):
                 mb = mb.model_dump()
             try:
-                await register_managed_bot(bot, mb)
+                await register_managed_bot(bot, self.workflow_data["manager"], mb)
             except Exception:
                 log.exception("Ошибка обработки managed_bot")
             return True
@@ -179,7 +179,7 @@ async def token_start(call: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(UserStates.waiting_token, F.chat.type == "private")
-async def token_received(message: Message, state: FSMContext, bot: Bot) -> None:
+async def token_received(message: Message, state: FSMContext, bot: Bot, manager) -> None:
     raw = (message.text or "").strip()
     try:
         await message.delete()  # токен не должен оставаться в переписке
@@ -198,7 +198,7 @@ async def token_received(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer("Указан токен основного бота. Требуется токен отдельного бота.")
         return
     await state.clear()
-    await _submit(bot, message.from_user.id, me, raw, "token",
+    await _submit(bot, manager, message.from_user.id, me, raw, "token",
                   {"full_name": message.from_user.full_name, "username": message.from_user.username})
     await _home(message)
 

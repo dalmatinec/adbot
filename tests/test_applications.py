@@ -33,6 +33,13 @@ class FakeBot:
 class FakeManager:
     def __init__(self):
         self.started = []
+        self.pending = set()
+
+    async def start_pending(self, app):
+        self.pending.add(app["user_id"])
+
+    async def stop_pending(self, owner_id):
+        self.pending.discard(owner_id)
 
     async def start(self, mirror):
         self.started.append(mirror["id"])
@@ -45,7 +52,7 @@ async def main() -> None:
     me = {"id": 1001, "username": "ads_x_bot"}
 
     # заявка: владелец и модератор получают карточку с кнопками, пользователь - подтверждение
-    r = await applications.submit(bot, 10, me, "123456:SECRET_TOKEN", "quick",
+    r = await applications.submit(bot, mgr, 10, me, "123456:SECRET_TOKEN", "quick",
                                   {"full_name": "Иван <b>", "username": "ivan"})
     assert r == "ok"
     for admin in (1, 2):
@@ -55,6 +62,7 @@ async def main() -> None:
     buttons = [b.callback_data for u, _, m in bot.sent if u == 1 and m for row in m.inline_keyboard for b in row]
     assert buttons == ["a:ap:10", "a:ar:10"]
     assert "направлена" in bot.to(10)[0]
+    assert mgr.pending == {10}                      # бот сразу отвечает на /start, пока заявка ждёт
 
     # токен в базе только в зашифрованном виде
     app = await db.get_application(10)
@@ -64,8 +72,8 @@ async def main() -> None:
     assert await db.get_mirror_by_owner(10) is None
 
     # повторная заявка и тот же бот отсекаются
-    assert await applications.submit(bot, 10, {"id": 1002, "username": "b_bot"}, "t", "token") == "has_app"
-    assert await applications.submit(bot, 11, me, "t", "token") == "bot_taken"
+    assert await applications.submit(bot, mgr, 10, {"id": 1002, "username": "b_bot"}, "t", "token") == "has_app"
+    assert await applications.submit(bot, mgr, 11, me, "t", "token") == "bot_taken"
 
     # принять: создаётся зеркало, запускается, заявка и токен заявки удалены
     assert await applications.approve(bot, mgr, 10) == "ads_x_bot"
@@ -73,32 +81,34 @@ async def main() -> None:
     assert mirror and mgr.started == [mirror["id"]]
     assert await db.get_application(10) is None
     assert any("одобрена" in t for t in bot.to(10))
+    assert 10 not in mgr.pending                    # ожидающий бот заменён полноценным зеркалом
     assert await applications.approve(bot, mgr, 10) is None      # второй раз - уже нет
 
     # у владельца зеркала новая заявка не принимается
-    assert await applications.submit(bot, 10, {"id": 1003, "username": "c_bot"}, "t", "token") == "has_mirror"
+    assert await applications.submit(bot, mgr, 10, {"id": 1003, "username": "c_bot"}, "t", "token") == "has_mirror"
 
     # отклонить: заявка и токен удалены, человеку сообщили
-    await applications.submit(bot, 12, {"id": 1004, "username": "d_bot"}, "t", "token")
-    assert await applications.reject(bot, 12)
+    await applications.submit(bot, mgr, 12, {"id": 1004, "username": "d_bot"}, "t", "token")
+    assert await applications.reject(bot, 12, manager=mgr)
     assert await db.get_application(12) is None
     assert any("отклонена" in t for t in bot.to(12))
-    assert not await applications.reject(bot, 12)
+    assert 12 not in mgr.pending
+    assert not await applications.reject(bot, 12, manager=mgr)
     # после отклонения можно подать заново
-    assert await applications.submit(bot, 12, {"id": 1004, "username": "d_bot"}, "t", "token") == "ok"
+    assert await applications.submit(bot, mgr, 12, {"id": 1004, "username": "d_bot"}, "t", "token") == "ok"
 
     # без ответа заявка отклоняется сама, владельцам сообщают
     await db.execute("UPDATE applications SET expires_at=? WHERE user_id=12", ("2000-01-01T00:00:00+00:00",))
     before = len(bot.to(1))
-    assert await applications.expire_once(bot) == 1
+    assert await applications.expire_once(bot, mgr) == 1
     assert await db.get_application(12) is None
     assert any("отклонена" in t for t in bot.to(12))
     assert len(bot.to(1)) == before + 1 and "по истечении срока" in bot.to(1)[-1]
-    assert await applications.expire_once(bot) == 0
+    assert await applications.expire_once(bot, mgr) == 0
 
     # свежие заявки не трогаются, бан удаляет заявку
-    await applications.submit(bot, 13, {"id": 1005, "username": "e_bot"}, "t", "token")
-    assert await applications.expire_once(bot) == 0
+    await applications.submit(bot, mgr, 13, {"id": 1005, "username": "e_bot"}, "t", "token")
+    assert await applications.expire_once(bot, mgr) == 0
     await db.ban_user(13)
     assert await db.get_application(13) is None
     assert await db.count_applications() == 0

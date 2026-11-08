@@ -30,10 +30,13 @@ class MirrorManager:
         self.bots: dict[int, Bot] = {}              # mirror_id -> Bot
         self._tasks: dict[int, asyncio.Task] = {}   # mirror_id -> задача polling
         self._dps: dict[int, Dispatcher] = {}
+        self._pending: dict[int, tuple[Bot, Dispatcher, asyncio.Task]] = {}  # owner_id -> бот с заявкой
 
     async def start_all(self) -> None:
         for row in await db.list_runnable_mirrors():
             await self.start(row)
+        for app in await db.list_applications():
+            await self.start_pending(app)
 
     async def start(self, mirror) -> None:
         mid = mirror["id"]
@@ -49,6 +52,59 @@ class MirrorManager:
         self._tasks[mid] = asyncio.create_task(self._run(mid, bot, dp), name=f"mirror-{mid}")
         asyncio.create_task(self.apply_description(bot))
         log.info("Зеркало #%s запущено", mid)
+
+    async def start_pending(self, app) -> None:
+        """Бот с неодобренной заявкой: сразу получает описание и отвечает на
+        /start, что заявка ждёт одобрения. Полноценным зеркалом станет после
+        принятия."""
+        owner_id = app["user_id"]
+        if owner_id in self._pending and not self._pending[owner_id][2].done():
+            return
+        bot = Bot(token=crypto.decrypt(app["token_enc"]),
+                  default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        dp = Dispatcher(storage=MemoryStorage(), owner_id=owner_id)
+        dp.update.outer_middleware(GuardMiddleware())
+        dp.include_router(mirror_cabinet.make_pending_router())
+        task = asyncio.create_task(self._run_pending(owner_id, bot, dp), name=f"pending-{owner_id}")
+        self._pending[owner_id] = (bot, dp, task)
+        asyncio.create_task(self.apply_description(bot))
+        log.info("Бот заявки пользователя %s запущен в режиме ожидания", owner_id)
+
+    async def stop_pending(self, owner_id: int) -> None:
+        entry = self._pending.pop(owner_id, None)
+        if entry is None:
+            return
+        bot, dp, task = entry
+        try:
+            await dp.stop_polling()
+        except Exception:
+            pass
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+
+    async def _run_pending(self, owner_id: int, bot: Bot, dp: Dispatcher) -> None:
+        delay = 5
+        while True:
+            try:
+                await dp.start_polling(bot, allowed_updates=["message"],
+                                       handle_signals=False, close_bot_session=False)
+                return
+            except TelegramUnauthorizedError:
+                log.warning("Токен заявки пользователя %s отозван", owner_id)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Бот заявки %s упал, перезапуск через %s с", owner_id, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 120)
 
     async def apply_description(self, bot: Bot) -> None:
         """Описание бота (видно до нажатия Старт) и краткое описание. Telegram
@@ -97,6 +153,8 @@ class MirrorManager:
     async def stop_all(self) -> None:
         for mid in list(self._tasks):
             await self.stop(mid)
+        for owner_id in list(self._pending):
+            await self.stop_pending(owner_id)
 
     async def _run(self, mirror_id: int, bot: Bot, dp: Dispatcher) -> None:
         delay = 5

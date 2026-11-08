@@ -358,3 +358,17 @@ async def _notify_moderators(main_bot: Bot, post_id: int, mirror, group, data: d
             await main_bot.send_message(owner["user_id"], text, reply_markup=markup)
         except Exception:
             log.warning("Не удалось отправить пост на проверку %s", owner["user_id"])
+
+
+def make_pending_router() -> Router:
+    """Бот, чья заявка ещё не рассмотрена: на любое сообщение от заявителя
+    отвечает, что заявка ожидает одобрения. Остальным не отвечает."""
+    r = Router()
+    r.message.filter(F.chat.type == "private")
+
+    @r.message()
+    async def pending(message: Message, owner_id: int) -> None:
+        if message.from_user.id == owner_id and await db.get_application(owner_id):
+            await message.answer(texts.PENDING_NOTICE)
+
+    return r

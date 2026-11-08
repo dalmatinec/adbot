@@ -41,7 +41,7 @@ def card_buttons(user_id: int):
     return kb([[("✅ Принять", f"a:ap:{user_id}"), ("❌ Отклонить", f"a:ar:{user_id}")]])
 
 
-async def submit(bot, owner_id: int, me: dict, token: str, source: str,
+async def submit(bot, manager, owner_id: int, me: dict, token: str, source: str,
                  user_info: dict | None = None) -> str:
     """Создаёт заявку и зовёт владельцев. Возвращает статус из
     db.create_application."""
@@ -53,6 +53,7 @@ async def submit(bot, owner_id: int, me: dict, token: str, source: str,
         return result
     app = await db.get_application(owner_id)
     user = await db.get_user(owner_id)
+    await manager.start_pending(app)
     await notify_owners(bot, card_text(app, user), card_buttons(owner_id))
     await _tell_user(
         bot, owner_id,
@@ -69,6 +70,7 @@ async def approve(bot, manager, user_id: int) -> str | None:
     if not app:
         return None
     mid = await db.approve_application(user_id)
+    await manager.stop_pending(user_id)
     if mid is None:
         return None
     await manager.start(await db.get_mirror(mid))
@@ -80,12 +82,14 @@ async def approve(bot, manager, user_id: int) -> str | None:
     return app["username"]
 
 
-async def reject(bot, user_id: int, reason: str = "отклонена владельцами") -> bool:
+async def reject(bot, user_id: int, reason: str = "отклонена владельцами", manager=None) -> bool:
     """Удаляет заявку вместе с токеном и сообщает пользователю."""
     app = await db.get_application(user_id)
     if not app:
         return False
     await db.delete_application(user_id)
+    if manager is not None:
+        await manager.stop_pending(user_id)
     await _tell_user(
         bot, user_id,
         f"Заявка на зеркало {reason}. Данные бота удалены. "
@@ -93,12 +97,12 @@ async def reject(bot, user_id: int, reason: str = "отклонена владе
     return True
 
 
-async def expire_once(bot) -> int:
+async def expire_once(bot, manager=None) -> int:
     n = 0
     for app in await db.expired_applications():
         user = await db.get_user(app["user_id"])
         if await reject(bot, app["user_id"],
-                        f"отклонена автоматически: решение не принято в течение {config.APPLICATION_TTL_HOURS} ч"):
+                        f"отклонена автоматически: решение не принято в течение {config.APPLICATION_TTL_HOURS} ч", manager):
             n += 1
             await notify_owners(
                 bot, f"Заявка {user_link(app['user_id'], user['full_name'] if user else None)} "
@@ -106,10 +110,10 @@ async def expire_once(bot) -> int:
     return n
 
 
-async def run_expiry(bot, every_seconds: int = 600) -> None:
+async def run_expiry(bot, manager, every_seconds: int = 600) -> None:
     while True:
         try:
-            await expire_once(bot)
+            await expire_once(bot, manager)
         except Exception:
             log.exception("Ошибка очистки заявок")
         await asyncio.sleep(every_seconds)
