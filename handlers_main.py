@@ -19,6 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 import applications
+import mirror_cabinet
 import posts
 import config
 import crypto
@@ -106,7 +107,7 @@ async def _ask_post(message: Message, state: FSMContext) -> None:
 
 
 @router.message(UserStates.waiting_post, F.chat.type == "private")
-async def post_received(message: Message, state: FSMContext, bot: Bot) -> None:
+async def post_received(message: Message, state: FSMContext, bot: Bot, manager) -> None:
     mirror = await db.mirror_for_staff(message.from_user.id)
     if not mirror or mirror["status"] != "active":
         await state.clear()
@@ -118,57 +119,18 @@ async def post_received(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     await state.clear()
     await db.save_draft(message.from_user.id, mirror["id"], st_chat, st_msg, buttons, title)
-    await message.answer(
-        f"Пост сохранён. Вернитесь в зеркало @{esc(mirror['username'])}, нажмите «Новый пост» "
-        "и выберите группу.",
-        reply_markup=kb([[("🪞 Открыть зеркало", f"https://t.me/{mirror['username']}")]]))
-
-
-@router.message(Command("cancel"), F.chat.type == "private")
-async def cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await _home(message)
-
-
-@router.callback_query(F.data == "m:home")
-async def home_cb(call: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await _home(call)
-
-
-# ---------- удаление зеркала и отзыв заявки ----------
-
-@router.callback_query(F.data == "m:del")
-async def delete_ask(call: CallbackQuery) -> None:
-    mirror = await db.get_mirror_by_owner(call.from_user.id)
-    if not mirror:
-        await _home(call)
-        return
-    await show(call, (
-        f"Удалить зеркало @{esc(mirror['username'])}? Все его посты, слоты и статистика будут удалены. "
-        "Сам бот в Telegram останется, при необходимости удалите его через @BotFather. "
-        "После удаления можно создать новое зеркало (потребуется одобрение владельцев)."),
-        kb([[("Да, удалить", "m:delc")], [("Отмена", "m:home")]]))
-
-
-@router.callback_query(F.data == "m:delc")
-async def delete_do(call: CallbackQuery, bot: Bot, manager) -> None:
-    mirror = await db.get_mirror_by_owner(call.from_user.id)
-    if mirror:
-        await manager.stop(mirror["id"])
-        await db.delete_mirror(mirror["id"])
-        await notify_owners(
-            bot, f"Пользователь {user_link(call.from_user.id, call.from_user.full_name)} "
-                 f"удалил зеркало @{esc(mirror['username'])}.")
-    await _home(call)
-
-
-@router.callback_query(F.data == "m:cancelapp")
-async def cancel_application(call: CallbackQuery, bot: Bot, manager) -> None:
-    if await applications.reject(bot, call.from_user.id, "отозвана заявителем", manager=manager):
-        await notify_owners(
-            bot, f"Пользователь {user_link(call.from_user.id, call.from_user.full_name)} отозвал заявку на зеркало.")
-    await _home(call)
+    mirror_bot = manager.bots.get(mirror["id"])
+    markup = kb([[("🪞 Вернуться в зеркало", f"https://t.me/{mirror['username']}")]])
+    if mirror_bot:
+        try:
+            # выбор группы приходит сразу в зеркало
+            await mirror_cabinet.prompt_group(mirror_bot, message.from_user.id, bot, mirror, message.from_user.id)
+            await message.answer("Пост сохранён. Выберите группу в зеркале.", reply_markup=markup)
+            return
+        except Exception:
+            log.exception("Не удалось отправить выбор группы через зеркало")
+    await message.answer("Пост сохранён. Вернитесь в зеркало, нажмите «Новый пост» и выберите группу.",
+                         reply_markup=markup)
 
 
 # ---------- создание зеркала через Managed Bots ----------

@@ -113,13 +113,9 @@ def make_router() -> Router:
         if not await db.list_groups(active_only=True):
             await call.answer("Пока нет доступных групп для рассылки.", show_alert=True)
             return
-        draft = await db.take_draft(call.from_user.id, mirror_id)
-        if draft:
-            data = {"st_chat": draft["storage_chat_id"], "st_msg": draft["storage_message_id"],
-                    "buttons": draft["buttons"], "title": draft["title"]}
-            await state.update_data(**data)
+        if await db.peek_draft(call.from_user.id, mirror_id):
             await call.answer()
-            await _choose_group(call.message, state, main_bot, mirror, call.from_user.id)
+            await prompt_group(call.bot, call.message.chat.id, main_bot, mirror, call.from_user.id)
             return
         await state.set_state(CabinetStates.waiting_post)
         me = await main_bot.me()
@@ -143,57 +139,19 @@ def make_router() -> Router:
             await wait.edit_text(esc(exc))
             return
         await wait.delete()
-        await state.update_data(st_chat=st_chat, st_msg=st_msg, buttons=buttons, title=title)
+        await state.clear()
+        await db.save_draft(message.from_user.id, mirror_id, st_chat, st_msg, buttons, title)
+        await prompt_group(bot, message.chat.id, main_bot, mirror, message.from_user.id)
 
-        await _choose_group(message, state, main_bot, mirror, message.from_user.id)
-
-    async def _choose_group(message: Message, state: FSMContext, main_bot: Bot, mirror, user_id: int) -> None:
-        groups = await db.list_groups(active_only=True)
-        if not groups:
-            await state.clear()
-            await message.answer("Сейчас нет доступных групп. Попробуйте позже.")
-            return
-        if len(groups) == 1:
-            await _finalize(message, state, main_bot, mirror, user_id, groups[0]["id"])
-            return
-        await state.set_state(CabinetStates.choosing_group)
-        rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:pg:{g['id']}")] for g in groups]
-        rows.append([("✖️ Отмена", "c:menu")])
-        await message.answer("Выберите группу для рассылки. На один пост выбирается одна группа.", reply_markup=kb(rows))
-
-    @r.callback_query(F.data.startswith("c:pg:"), CabinetStates.choosing_group)
+    @r.callback_query(F.data.startswith("c:pg:"))
     async def pick_group(call: CallbackQuery, state: FSMContext, main_bot: Bot, mirror_id: int) -> None:
         mirror = await _staff_mirror(call.from_user.id, mirror_id)
         if not mirror:
             return
         await call.answer()
-        await _finalize(call.message, state, main_bot, mirror, call.from_user.id,
-                        int(call.data.split(":")[2]))
-
-    async def _finalize(message: Message, state: FSMContext, main_bot: Bot,
-                        mirror, user_id: int, group_id: int) -> None:
-        data = await state.get_data()
         await state.clear()
-        group = await db.get_group(group_id)
-        if not group or not group["is_active"] or "st_msg" not in data:
-            await message.answer("Эта группа сейчас недоступна, начните заново.")
-            return
-        if await db.count_posts(mirror["id"]) >= mirror["slots"]:
-            await message.answer("Все слоты заняты, пост не создан.")
-            return
-        pending = await db.moderation_on()
-        post_id = await db.create_post(
-            mirror["id"], group_id, user_id, data["title"], data["st_chat"], data["st_msg"],
-            data["buttons"], pending,
-        )
-        if pending:
-            await _notify_moderators(main_bot, post_id, mirror, group, data)
-            text = "Пост принят и направлен на проверку. После одобрения рассылка будет запущена."
-        else:
-            interval = await db.effective_interval(group["interval_minutes"])
-            text = (f"Пост принят. Рассылка в группу <b>{esc(group['title'])}</b> "
-                    f"будет выполняться каждые {fmt_interval(interval)}. Первая отправка в течение минуты.")
-        await message.answer(text, reply_markup=kb([[("📋 Мои посты", "c:posts"), ("🏠 Меню", "c:menu")]]))
+        await finalize(call.bot, call.message.chat.id, main_bot, mirror, call.from_user.id,
+                       int(call.data.split(":")[2]))
 
     # ---------- мои посты ----------
 
@@ -356,6 +314,51 @@ def make_router() -> Router:
         await _admins_screen(call, mirror, True)
 
     return r
+
+
+async def prompt_group(bot: Bot, chat_id: int, main_bot: Bot, mirror, user_id: int) -> None:
+    """Шаг выбора группы для сохранённого черновика. Работает без FSM, поэтому
+    его можно вызвать и из основного бота после приёма поста."""
+    groups = await db.list_groups(active_only=True)
+    if not groups:
+        await bot.send_message(chat_id, "Сейчас нет доступных групп. Попробуйте позже.")
+        return
+    if len(groups) == 1:
+        await finalize(bot, chat_id, main_bot, mirror, user_id, groups[0]["id"])
+        return
+    rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:pg:{g['id']}")] for g in groups]
+    rows.append([("✖️ Отмена", "c:menu")])
+    await bot.send_message(chat_id, "Пост принят. Выберите группу для рассылки. "
+                                    "На один пост выбирается одна группа.", reply_markup=kb(rows))
+
+
+async def finalize(bot: Bot, chat_id: int, main_bot: Bot, mirror, user_id: int, group_id: int) -> None:
+    group = await db.get_group(group_id)
+    if not group or not group["is_active"]:
+        await bot.send_message(chat_id, "Эта группа сейчас недоступна, начните заново.")
+        return
+    if await db.count_posts(mirror["id"]) >= mirror["slots"]:
+        await bot.send_message(chat_id, "Все слоты заняты, пост не создан.")
+        return
+    draft = await db.take_draft(user_id, mirror["id"])
+    if not draft:
+        await bot.send_message(chat_id, "Пост не найден, отправьте его заново.")
+        return
+    data = {"st_chat": draft["storage_chat_id"], "st_msg": draft["storage_message_id"],
+            "buttons": draft["buttons"], "title": draft["title"]}
+    pending = await db.moderation_on()
+    post_id = await db.create_post(
+        mirror["id"], group_id, user_id, data["title"], data["st_chat"], data["st_msg"],
+        data["buttons"], pending,
+    )
+    if pending:
+        await _notify_moderators(main_bot, post_id, mirror, group, data)
+        text = "Пост принят и направлен на проверку. После одобрения рассылка будет запущена."
+    else:
+        interval = await db.effective_interval(group["interval_minutes"])
+        text = (f"Пост принят. Рассылка в группу <b>{esc(group['title'])}</b> "
+                f"будет выполняться каждые {fmt_interval(interval)}. Первая отправка в течение минуты.")
+    await bot.send_message(chat_id, text, reply_markup=kb([[("📋 Мои посты", "c:posts"), ("🏠 Меню", "c:menu")]]))
 
 
 async def _notify_moderators(main_bot: Bot, post_id: int, mirror, group, data: dict) -> None:

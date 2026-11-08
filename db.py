@@ -695,3 +695,7 @@ async def take_draft(user_id: int, mirror_id: int):
     if row:
         await execute("DELETE FROM drafts WHERE user_id=?", (user_id,))
     return row
+
+
+async def peek_draft(user_id: int, mirror_id: int):
+    return await one("SELECT * FROM drafts WHERE user_id=? AND mirror_id=?", (user_id, mirror_id))
