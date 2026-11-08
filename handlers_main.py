@@ -13,12 +13,13 @@ import secrets
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 import applications
+import posts
 import config
 import crypto
 import db
@@ -36,6 +37,7 @@ NAME_WORDS = ["Pulse", "Orbit", "Echo", "Nova", "Spark", "Wave", "Flux", "Prime"
 
 class UserStates(StatesGroup):
     waiting_token = State()
+    waiting_post = State()
 
 
 # ---------- главное меню ----------
@@ -82,9 +84,44 @@ async def _blocked(user_id: int) -> bool:
 
 
 @router.message(CommandStart(), F.chat.type == "private")
-async def start(message: Message, state: FSMContext) -> None:
+async def start(message: Message, state: FSMContext, command: CommandObject) -> None:
     await state.clear()
+    if command.args == "post":
+        await _ask_post(message, state)
+        return
     await _home(message)
+
+
+async def _ask_post(message: Message, state: FSMContext) -> None:
+    """Приём поста основным ботом: так сохраняются премиум-эмодзи."""
+    mirror = await db.mirror_for_staff(message.from_user.id)
+    if not mirror or mirror["status"] != "active":
+        await message.answer("Отправка постов доступна владельцам и админам активного зеркала.")
+        return
+    await state.set_state(UserStates.waiting_post)
+    await message.answer(
+        "Отправьте пост одним сообщением: текст, фото, видео, GIF или файл. "
+        "Пост сохраняется без изменений, включая премиум-эмодзи и кнопки-ссылки.\n\n"
+        "Для отмены отправьте /cancel.")
+
+
+@router.message(UserStates.waiting_post, F.chat.type == "private")
+async def post_received(message: Message, state: FSMContext, bot: Bot) -> None:
+    mirror = await db.mirror_for_staff(message.from_user.id)
+    if not mirror or mirror["status"] != "active":
+        await state.clear()
+        return
+    try:
+        st_chat, st_msg, buttons, title = await posts.ingest_direct(bot, message)
+    except posts.IngestError as exc:
+        await message.answer(esc(exc))
+        return
+    await state.clear()
+    await db.save_draft(message.from_user.id, mirror["id"], st_chat, st_msg, buttons, title)
+    await message.answer(
+        f"Пост сохранён. Вернитесь в зеркало @{esc(mirror['username'])}, нажмите «Новый пост» "
+        "и выберите группу.",
+        reply_markup=kb([[("🪞 Открыть зеркало", f"https://t.me/{mirror['username']}")]]))
 
 
 @router.message(Command("cancel"), F.chat.type == "private")

@@ -116,3 +116,26 @@ async def ingest(mirror_bot: Bot, main_bot: Bot, message: Message) -> tuple[int,
             "Не удалось принять пост. Повторите попытку. Если ошибка повторяется, обратитесь к владельцам."
         ) from exc
     return target, saved.message_id, extract_buttons(message), post_title(message)
+
+
+async def ingest_direct(main_bot: Bot, message: Message) -> tuple[int, int, str | None, str]:
+    """Пост прислан самому основному боту. Копируем его в хранилище один в один
+    (copy_message сохраняет все сущности, включая премиум-эмодзи, и не требует
+    скачивать файл), а рассылка потом идёт пересылкой из хранилища."""
+    if message.media_group_id:
+        raise IngestError("Альбомы не поддерживаются. Отправьте один пост: текст, фото, видео, GIF или файл.")
+    if not (message.text or message.photo or message.video or message.animation
+            or message.document or message.audio):
+        raise IngestError("Данный тип сообщения не поддерживается. Допустимы текст, фото, видео, GIF и файлы.")
+    hit = await _stopword_hit(message.text or message.caption or "")
+    if hit:
+        raise IngestError(f"Пост содержит запрещённое слово: {hit}.")
+    try:
+        saved = await main_bot.copy_message(
+            config.STORAGE_CHAT_ID, from_chat_id=message.chat.id, message_id=message.message_id)
+    except Exception as exc:
+        log.exception("Не удалось сохранить пост в хранилище (direct)")
+        raise IngestError(
+            "Не удалось принять пост. Повторите попытку. Если ошибка повторяется, обратитесь к владельцам."
+        ) from exc
+    return config.STORAGE_CHAT_ID, saved.message_id, extract_buttons(message), post_title(message)
