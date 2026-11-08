@@ -20,7 +20,16 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 
 class FakeBot:
     def __init__(self):
-        self.copies, self.messages, self.fail = [], [], None
+        self.copies, self.forwards, self.edits, self.messages, self.fail = [], [], [], [], None
+
+    async def forward_message(self, **kw):
+        if self.fail:
+            raise self.fail
+        self.forwards.append(kw)
+        return type("Sent", (), {"message_id": 777})()
+
+    async def edit_message_reply_markup(self, **kw):
+        self.edits.append(kw)
 
     async def copy_message(self, **kw):
         if self.fail:
@@ -39,13 +48,22 @@ async def main() -> None:
     p = await db.create_post(m, g, 10, "Реклама", -100999, 5, btn, pending=False)
     bot = FakeBot()
 
-    # обычная отправка: пост копируется из хранилища, кнопки сохраняются
+    # по умолчанию пересылка: пометка Переслано от, кнопки добавляются отдельным вызовом
+    assert await scheduler.tick(bot) == 1
+    f = bot.forwards[0]
+    assert f["chat_id"] == -100500 and f["from_chat_id"] == -100999 and f["message_id"] == 5
+    assert bot.copies == [] and bot.edits[0]["message_id"] == 777
+    assert bot.edits[0]["reply_markup"].inline_keyboard[0][0].url == "https://example.com"
+
+    # режим copy: чистая копия с кнопками
+    await db.set_setting("send_mode", "copy")
+    await db.delay_post(p, -1)
     assert await scheduler.tick(bot) == 1
     c = bot.copies[0]
     assert c["chat_id"] == -100500 and c["from_chat_id"] == -100999 and c["message_id"] == 5
     assert c["reply_markup"].inline_keyboard[0][0].url == "https://example.com"
     post = await db.get_post(p)
-    assert post["sent_count"] == 1 and post["next_send_at"] > db.now()
+    assert post["sent_count"] == 2 and post["next_send_at"] > db.now()
 
     # до следующего интервала повторно не шлёт
     assert await scheduler.tick(bot) == 0

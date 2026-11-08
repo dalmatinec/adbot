@@ -523,12 +523,16 @@ async def settings(call: CallbackQuery, state: FSMContext) -> None:
     mod = await db.moderation_on()
     slots = await db.get_setting("default_slots", str(config.DEFAULT_SLOTS))
     sw = await db.get_setting("stopwords", "") or "нет"
+    mode = await db.get_setting("send_mode", "forward")
+    mode_text = "пересылка (Переслано от канала-хранилища)" if mode == "forward" else "копия (без пометки)"
     text = (f"⚙️ <b>Настройки</b>\n\nОбщий интервал: {fmt_interval(gi)}\n"
+            f"Режим отправки: {mode_text}\n"
             f"Модерация постов: {'включена' if mod else 'выключена'}\n"
             f"Слотов у новых зеркал: {slots}\nСтоп-слова: {esc(sw)}")
     await show(call, text, kb([
         [("⏱ Общий интервал", "a:si")],
         [(f"🛡 Модерация: {'выключить' if mod else 'включить'}", "a:smod")],
+        [("Режим отправки: " + ("копия" if mode == "forward" else "пересылка") + " (сменить)", "a:smode")],
         [("🎟 Слоты по умолчанию", "a:ssl")],
         [("🚫 Стоп-слова", "a:sw")],
         [("📝 Описание зеркал", "a:desc")],
@@ -540,6 +544,14 @@ async def settings(call: CallbackQuery, state: FSMContext) -> None:
 async def set_moderation(call: CallbackQuery, state: FSMContext) -> None:
     if await _need(call, True):
         await db.set_setting("moderation", "0" if await db.moderation_on() else "1")
+        await settings(call, state)
+
+
+@router.callback_query(F.data == "a:smode")
+async def set_send_mode(call: CallbackQuery, state: FSMContext) -> None:
+    if await _need(call, True):
+        mode = await db.get_setting("send_mode", "forward")
+        await db.set_setting("send_mode", "copy" if mode == "forward" else "forward")
         await settings(call, state)
 
 

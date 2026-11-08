@@ -1,6 +1,6 @@
 """Фоновая отправка рекламы. Все рассылки делает основной бот: он состоит в
 группах админом и копирует пост из канала-хранилища (copy_message), поэтому
-в группе нет пометки о пересылке, а посты не зависят от зеркал.
+в режиме copy в группе нет пометки о пересылке, а посты не зависят от зеркал.
 
 Каждый активный пост уходит в свою группу раз в интервал (интервал группы
 или общий). Отправки идут по одной с паузой, чтобы не упереться в лимиты
@@ -23,16 +23,12 @@ log = logging.getLogger(__name__)
 async def tick(bot) -> int:
     """Один проход: отправляет всё, что пора. Возвращает число успешных отправок."""
     sent = 0
+    mode = await db.get_setting("send_mode", "forward")  # forward | copy
     for post in await db.due_posts():
         interval = await db.effective_interval(post["group_interval"])
         ids = (post["id"], interval, post["group_id"], post["mirror_id"])
         try:
-            await bot.copy_message(
-                chat_id=post["group_chat_id"],
-                from_chat_id=post["storage_chat_id"],
-                message_id=post["storage_message_id"],
-                reply_markup=posts.buttons_markup(post["buttons"]),
-            )
+            await _deliver(bot, post, mode)
         except TelegramRetryAfter as exc:
             await db.delay_post(post["id"], int(exc.retry_after) + 1)
             await asyncio.sleep(min(int(exc.retry_after), 30))
@@ -50,6 +46,28 @@ async def tick(bot) -> int:
         sent += 1
         await asyncio.sleep(config.SEND_DELAY_SECONDS)
     return sent
+
+
+async def _deliver(bot, post, mode: str) -> None:
+    """forward: в группе пометка Переслано от с названием канала-хранилища.
+    copy: чистая копия без пометки. forwardMessage не принимает кнопки, поэтому
+    кнопки-ссылки добавляются отдельным вызовом (если Telegram не даст, пост
+    всё равно остаётся)."""
+    markup = posts.buttons_markup(post["buttons"])
+    if mode == "forward":
+        sent = await bot.forward_message(
+            chat_id=post["group_chat_id"], from_chat_id=post["storage_chat_id"],
+            message_id=post["storage_message_id"])
+        if markup:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=post["group_chat_id"], message_id=sent.message_id, reply_markup=markup)
+            except Exception:
+                log.warning("Не удалось добавить кнопки к пересланному посту %s", post["id"], exc_info=True)
+    else:
+        await bot.copy_message(
+            chat_id=post["group_chat_id"], from_chat_id=post["storage_chat_id"],
+            message_id=post["storage_message_id"], reply_markup=markup)
 
 
 async def _handle_send_error(bot, post, error: str) -> None:
