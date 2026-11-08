@@ -37,17 +37,24 @@ async def call(token: str, method: str, **params):
     return await asyncio.to_thread(_call_sync, token, method, params)
 
 
+def parse_managed_bot(mb: dict) -> tuple[dict, dict]:
+    """Из события managed_bot достаёт (пользователь-создатель, созданный бот).
+    В реальном событии бот лежит в поле bot_user (по документации и в старых
+    описаниях встречалось bot), поддерживаем оба."""
+    return (mb.get("user") or {}), (mb.get("bot_user") or mb.get("bot") or {})
+
+
 async def get_managed_bot_token(manager_token: str, bot_id: int) -> str:
-    """Токен управляемого бота. Название параметра у метода уточняется по
-    ответу API: пробуем user_id, затем bot_id."""
-    last: Exception | None = None
-    for field in ("user_id", "bot_id"):
+    """Токен управляемого бота. Название параметра у метода пробуем по очереди,
+    в ошибке покажем все попытки."""
+    errors = []
+    for field in ("user_id", "bot_id", "bot_user_id"):
         try:
             result = await call(manager_token, "getManagedBotToken", **{field: bot_id})
             return result if isinstance(result, str) else result["token"]
         except TgError as exc:
-            last = exc
-    raise TgError(f"getManagedBotToken: {last}")
+            errors.append(f"{field}: {exc}")
+    raise TgError("getManagedBotToken не принял параметры: " + "; ".join(errors))
 
 
 async def get_me(token: str) -> dict:

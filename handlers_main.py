@@ -100,9 +100,8 @@ async def create_mirror(call: CallbackQuery, bot: Bot) -> None:
 async def register_managed_bot(bot: Bot, mb: dict) -> None:
     """Событие managed_bot: пользователь подтвердил создание зеркала.
     Бот не запускается сразу, а уходит в заявку владельцам."""
-    user = mb.get("user") or {}
+    user, bot_info = tg_raw.parse_managed_bot(mb)
     owner_id = user.get("id")
-    bot_info = mb.get("bot") or {}
     bot_id = bot_info.get("id")
     if not owner_id or not bot_id:
         log.warning("managed_bot без user/bot: %s", mb)
