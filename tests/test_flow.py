@@ -164,14 +164,20 @@ async def main() -> None:
     assert any(uid == 1 and "Вход в кабинет" in t for uid, t in BOT.sent)
     assert await passes(Msg(50, "/start")) and await passes(Call(50, "c:home"))
 
-    # новая рассылка: одна открытая группа, выбор пропускается
+    # новая рассылка: название, пост, подтверждение. Группа одна, выбор пропускается
     await cabinet.new_post(Call(50, "c:new"), st(50))
-    assert await st(50).get_state() == cabinet.S.post.state
+    assert await st(50).get_state() == cabinet.S.new_name.state and "Шаг 1" in SCREEN[50][0]
+    await cabinet.new_name(Msg(50, "Скидки"), st(50))
+    assert await st(50).get_state() == cabinet.S.post.state and "Шаг 2" in SCREEN[50][0]
     post_msg = Msg(50, "Скидки на всё 🔥")
     await cabinet.got_post(post_msg, st(50), BOT)
+    assert BOT.forwards[-2] == (-100999, 50, [post_msg.message_id])
+    assert BOT.forwards[-1][0] == 50                      # превью перед запуском
+    assert "Шаг 3" in SCREEN[50][0] and "c:ok" in buttons(50)
+    assert await db.count_posts(cab) == 0                 # без подтверждения ничего не создаётся
+    await cabinet.new_confirm(Call(50, "c:ok"), st(50))
     posts_ = await db.list_posts(cab)
-    assert len(posts_) == 1 and posts_[0]["group_id"] == g1
-    assert BOT.forwards[-1] == (-100999, 50, [post_msg.message_id])
+    assert len(posts_) == 1 and posts_[0]["group_id"] == g1 and posts_[0]["title"] == "Скидки"
     assert "запущена" in SCREEN[50][0]
     p1 = posts_[0]["id"]
 
@@ -179,23 +185,35 @@ async def main() -> None:
     assert await scheduler.tick(BOT) == 1
     assert BOT.forwards[-1] == (-1001, -100999, [int(posts_[0]["storage_ids"])])
 
-    # две открытые группы: альбом из трёх сообщений, затем выбор группы
+    # отмена на подтверждении: рассылки нет, пост убран из хранилища
+    await cabinet.new_post(Call(50, "c:new"), st(50))
+    await cabinet.new_name(Msg(50, "Передумал"), st(50))
+    await cabinet.got_post(Msg(50, "Текст"), st(50), BOT)
+    await cabinet.new_cancel(Call(50, "c:no"), st(50), BOT)
+    assert await db.count_posts(cab) == 1 and BOT.deleted[-1][0] == -100999
+
+    # две открытые группы: альбом из трёх сообщений, выбор группы, подтверждение
     await db.set_group_flag(g3, "is_public", True)
     await cabinet.new_post(Call(50, "c:new"), st(50))
+    await cabinet.new_name(Msg(50, "Альбом"), st(50))
     parts = [Msg(50, media_group_id="alb", photo=[1], caption="Альбом" if i == 0 else None) for i in range(3)]
     await asyncio.gather(*(cabinet.got_post(m, st(50), BOT) for m in parts))
     assert BOT.forwards[-1] == (-100999, 50, [m.message_id for m in parts])
     assert f"c:g:{g1}" in buttons(50) and f"c:g:{g3}" in buttons(50) and f"c:g:{g2}" not in buttons(50)
     await cabinet.pick_group(Call(50, f"c:g:{g3}"), st(50), BOT)
+    assert "Вторая открытая" in SCREEN[50][0]
+    await cabinet.new_confirm(Call(50, "c:ok"), st(50))
     posts_ = await db.list_posts(cab)
     assert len(posts_) == 2 and posts_[1]["group_id"] == g3 and posts_[1]["storage_ids"].count(",") == 2
     p2 = posts_[1]["id"]
 
     # в скрытую группу партнёр попасть не может даже подделкой кнопки
     await cabinet.new_post(Call(50, "c:new"), st(50))
+    await cabinet.new_name(Msg(50, "Третий"), st(50))
     await cabinet.got_post(Msg(50, "Третий"), st(50), BOT)
     await cabinet.pick_group(Call(50, f"c:g:{g2}"), st(50), BOT)
     assert await db.count_posts(cab) == 2 and "недоступна" in SCREEN[50][0]
+    await cabinet.new_cancel(Call(50, "c:no"), st(50), BOT)
 
     # лимит мест
     await db.set_cabinet_slots(cab, 2)
@@ -218,7 +236,7 @@ async def main() -> None:
     await cabinet.replace_start(Call(50, f"c:rep:{p1}"), st(50))
     await cabinet.got_post(Msg(50, "Новый текст"), st(50), BOT)
     post = await db.get_post(p1)
-    assert post["title"] == "Новый текст" and post["sent_count"] == 1 and post["storage_ids"] != old_ids
+    assert post["title"] == "Скидки" and post["sent_count"] == 1 and post["storage_ids"] != old_ids
     assert BOT.deleted[-1] == (-100999, [int(old_ids)])
 
     # название: задаётся вручную и переживает замену поста

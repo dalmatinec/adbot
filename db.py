@@ -460,12 +460,12 @@ async def count_posts(cabinet_id: int) -> int:
 
 
 async def create_post(cabinet_id: int, group_id: int, created_by: int, title: str,
-                      storage_chat_id: int, storage_ids: list[int]) -> int:
+                      storage_chat_id: int, storage_ids: list[int], named: bool = False) -> int:
     ts = now()
     return await insert(
-        "INSERT INTO posts(cabinet_id, group_id, created_by, title, storage_chat_id, storage_ids, "
-        "created_at, next_send_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (cabinet_id, group_id, created_by, title, storage_chat_id,
+        "INSERT INTO posts(cabinet_id, group_id, created_by, title, named, storage_chat_id, storage_ids, "
+        "created_at, next_send_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (cabinet_id, group_id, created_by, title, int(named), storage_chat_id,
          ",".join(map(str, storage_ids)), ts, ts))
 
 

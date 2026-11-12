@@ -29,7 +29,9 @@ _albums: dict[tuple[int, str], list[int]] = {}
 class S(StatesGroup):
     post = State()      # ждём пост (новый или на замену)
     group = State()     # ждём выбор группы
-    name = State()      # ждём название рассылки
+    name = State()      # ждём новое название существующей рассылки
+    new_name = State()  # шаг 1: название новой рассылки
+    confirm = State()   # шаг 3: подтверждение запуска
 
 
 async def _cabinet(user_id: int):
@@ -130,10 +132,11 @@ async def home_cb(call: CallbackQuery, state: FSMContext) -> None:
 async def help_(call: CallbackQuery) -> None:
     await show(call, (
         "ℹ️ <b>Как это работает</b>\n\n"
-        "1. Нажмите <b>Новая рассылка</b> и пришлите пост. Можно написать его здесь "
-        "или переслать из канала, группы или от другого бота.\n"
-        "2. Выберите группу. Бот начнёт пересылать пост в неё с заданным интервалом.\n"
-        "3. Пост пересылается как есть, без изменений.\n\n"
+        "1. Нажмите <b>Новая рассылка</b> и задайте название.\n"
+        "2. Пришлите пост. Можно написать его здесь или переслать из канала, группы "
+        "или от другого бота.\n"
+        "3. Выберите группу, проверьте пост и подтвердите запуск.\n\n"
+        "Пост пересылается как есть, без изменений, с заданным интервалом.\n\n"
         "В карточке рассылки доступны превью, замена поста, пауза и удаление.\n"
         "Интервал и список групп задаёт администрация."
     ), kb([[("⬅️ Назад", "c:home")]]))
@@ -180,14 +183,31 @@ async def new_post(call: CallbackQuery, state: FSMContext) -> None:
     if not await db.groups_for_cabinet(cabinet):
         await call.answer("Сейчас нет доступных групп. Обратитесь к администрации.", show_alert=True)
         return
-    await state.set_state(S.post)
-    await state.set_data({"mode": "new"})
+    await state.set_state(S.new_name)
     await show(call, (
-        "➕ <b>Новая рассылка</b>\n\n"
-        "Пришлите пост одним сообщением. Его можно написать здесь или переслать "
-        "из канала, группы или от бота. Пост будет пересылаться без изменений.\n\n"
+        "➕ <b>Новая рассылка</b>\n"
+        "Шаг 1 из 3. Название\n\n"
+        "Пришлите название рассылки, до 40 символов. По нему вы будете находить её в списке. "
+        "В группу название не попадает.\n\n"
         "Для отмены нажмите Назад."
     ), kb([[("⬅️ Назад", "c:home")]]))
+
+
+@router.message(S.new_name)
+async def new_name(message: Message, state: FSMContext) -> None:
+    name = " ".join((message.text or "").split())
+    if not name or name.startswith("/") or len(name) > 40:
+        await message.answer("Название должно быть текстом до 40 символов. Пришлите ещё раз.")
+        return
+    await state.set_state(S.post)
+    await state.set_data({"mode": "new", "name": name})
+    await message.answer((
+        "➕ <b>Новая рассылка</b>\n"
+        "Шаг 2 из 3. Пост\n\n"
+        f"Название: {esc(name)}\n\n"
+        "Пришлите пост одним сообщением. Его можно написать здесь или переслать "
+        "из канала, группы или от бота. Пост будет пересылаться без изменений."
+    ), reply_markup=kb([[("✖️ Отмена", "c:home")]]))
 
 
 @router.callback_query(F.data.startswith("c:rep:"))
@@ -254,14 +274,13 @@ async def got_post(message: Message, state: FSMContext, bot: Bot) -> None:
         await state.clear()
         await message.answer("Сейчас нет доступных групп. Обратитесь к администрации.")
         return
+    await state.update_data(stored=stored)
     if len(groups) == 1:
-        await state.clear()
-        await _create(message, bot, cabinet, groups[0]["id"], title, stored)
+        await _confirm(message, state, bot, groups[0])
         return
     await state.set_state(S.group)
-    await state.set_data({"title": title, "stored": stored})
     rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:g:{g['id']}")] for g in groups]
-    rows.append([("✖️ Отмена", "c:home")])
+    rows.append([("✖️ Отмена", "c:no")])
     await message.answer("✅ Пост принят.\n\nВыберите группу для рассылки.", reply_markup=kb(rows))
 
 
@@ -270,31 +289,69 @@ async def pick_group(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     cabinet = await _active_cabinet(call)
     if not cabinet:
         return
-    data = await state.get_data()
-    await state.clear()
     await call.answer()
-    await _create(call.message, bot, cabinet, int(call.data.split(":")[2]), data["title"], data["stored"])
-
-
-async def _create(message: Message, bot: Bot, cabinet, group_id: int, title: str, stored: list[int]) -> None:
     allowed = {g["id"]: g for g in await db.groups_for_cabinet(cabinet)}
-    group = allowed.get(group_id)
+    group = allowed.get(int(call.data.split(":")[2]))
     if not group:
-        await message.answer("Эта группа сейчас недоступна. Начните заново.")
+        await call.message.answer("Эта группа сейчас недоступна. Выберите другую.")
         return
-    if await db.count_posts(cabinet["id"]) >= cabinet["slots"]:
-        await message.answer("Все места заняты, рассылка не создана.")
-        return
-    post_id = await db.create_post(cabinet["id"], group_id, message.chat.id, title, config.STORAGE_CHAT_ID, stored)
+    await _confirm(call.message, state, bot, group)
+
+
+async def _confirm(message: Message, state: FSMContext, bot: Bot, group) -> None:
+    """Шаг 3: показываем пост и просим подтвердить запуск."""
+    data = await state.get_data()
+    await state.set_state(S.confirm)
+    await state.update_data(group_id=group["id"])
+    try:
+        await posts.forward(bot, message.chat.id, config.STORAGE_CHAT_ID, data["stored"])
+    except Exception:
+        log.warning("Не удалось показать превью перед запуском", exc_info=True)
     interval = await db.effective_interval(group["interval_hours"])
-    await message.answer(
-        f"✅ <b>Рассылка #{post_id} запущена</b>\n\n"
+    await message.answer((
+        "➕ <b>Новая рассылка</b>\n"
+        "Шаг 3 из 3. Подтверждение\n\n"
+        f"🏷 Название: {esc(data['name'])}\n"
         f"💬 Группа: {esc(group['title'])}\n"
         f"⏱ Интервал: {fmt_hours(interval)}\n\n"
-        "Первая отправка в течение минуты.\n"
-        "Чтобы легко находить рассылку в списке, задайте ей название.",
-        reply_markup=kb([[("✏️ Задать название", f"c:pn:{post_id}")],
-                         [("📄 Открыть рассылку", f"c:p:{post_id}")], [("🏠 В кабинет", "c:home")]]))
+        "Выше показано, как пост будет выглядеть в группе. Запустить рассылку?"
+    ), reply_markup=kb([[("✅ Запустить", "c:ok")], [("✖️ Отмена", "c:no")]]))
+
+
+@router.callback_query(F.data == "c:no")
+async def new_cancel(call: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    await state.clear()
+    if data.get("stored"):
+        await posts.drop_stored(bot, config.STORAGE_CHAT_ID, data["stored"])
+    await home(call)
+
+
+@router.callback_query(F.data == "c:ok", S.confirm)
+async def new_confirm(call: CallbackQuery, state: FSMContext) -> None:
+    cabinet = await _active_cabinet(call)
+    if not cabinet:
+        return
+    data = await state.get_data()
+    await state.clear()
+    allowed = {g["id"]: g for g in await db.groups_for_cabinet(cabinet)}
+    group = allowed.get(data.get("group_id"))
+    if not group:
+        await show(call, "Эта группа сейчас недоступна. Начните заново.", kb([[("🏠 В кабинет", "c:home")]]))
+        return
+    if await db.count_posts(cabinet["id"]) >= cabinet["slots"]:
+        await show(call, "Все места заняты, рассылка не создана.", kb([[("🏠 В кабинет", "c:home")]]))
+        return
+    post_id = await db.create_post(cabinet["id"], group["id"], call.from_user.id, data["name"],
+                                   config.STORAGE_CHAT_ID, data["stored"], named=True)
+    interval = await db.effective_interval(group["interval_hours"])
+    await show(call, (
+        f"✅ <b>Рассылка #{post_id} запущена</b>\n\n"
+        f"🏷 Название: {esc(data['name'])}\n"
+        f"💬 Группа: {esc(group['title'])}\n"
+        f"⏱ Интервал: {fmt_hours(interval)}\n\n"
+        "Первая отправка в течение минуты."
+    ), kb([[("📄 Открыть рассылку", f"c:p:{post_id}")], [("🏠 В кабинет", "c:home")]]))
 
 
 # ---------- мои рассылки ----------
