@@ -48,7 +48,7 @@ async def menu(target) -> None:
         f"⏱ Общий интервал: {fmt_hours(await db.global_interval())}\n"
         f"📊 Всего отправок: {s['sent']}"
     ), kb([
-        [("🏪 Кабинеты", "a:cabs:0"), ("📄 Рассылки", "a:posts:0")],
+        [("🏪 Кабинеты", "a:cabs:0")],
         [("💬 Группы", "a:groups"), ("⏱ Интервал", "a:int")],
         [("👑 Владельцы", "a:own"), ("📣 Объявление", "a:bc")],
         [("💾 Бэкап", "a:bk")],
@@ -291,31 +291,19 @@ async def _cabinet_posts(call: CallbackQuery, cid: int) -> None:
     items = await db.list_posts(cid)
     rows = [[(f"{POST_ICON[p['status']]} #{p['id']} {p['title']}", f"a:p:{p['id']}")] for p in items]
     rows.append([("⬅️ К кабинету", f"a:cab:{cid}")])
-    await show(call, f"📄 <b>Рассылки кабинета {esc(cabinet['name'])}</b>\n\n"
-                     + (f"Всего: {len(items)}" if items else "Рассылок нет."), kb(rows))
-
-
-@router.callback_query(F.data.startswith("a:posts:"))
-async def all_posts(call: CallbackQuery) -> None:
-    page = _arg(call)
-    total = await db.count_all_posts()
-    items = await db.list_all_posts(page * PAGE, PAGE)
-    rows = [[(f"{POST_ICON[p['status']]} #{p['id']} {p['cabinet_name']}: {p['title']}"[:60], f"a:p:{p['id']}")]
-            for p in items]
-    nav = []
-    if page > 0:
-        nav.append(("◀️", f"a:posts:{page - 1}"))
-    if (page + 1) * PAGE < total:
-        nav.append(("▶️", f"a:posts:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([("⬅️ Назад", "a:menu")])
-    await show(call, f"📄 <b>Все рассылки</b>\n\nВсего: {total}", kb(rows))
+    people = "\n".join(
+        f"{'👤 Владелец' if m['role'] == 'owner' else '🤝 Помощник'}: {person(m)}"
+        for m in await db.cabinet_members(cid)) or "👤 Владелец: не вошёл"
+    await show(call, f"📄 <b>Рассылки кабинета {esc(cabinet['name'])}</b>\n\n{people}\n\n"
+                     + (f"Всего рассылок: {len(items)}" if items else "Рассылок нет."), kb(rows))
 
 
 async def _admin_post_card(target, post) -> None:
     text = await post_text(post)
     text += f"\n\n🏪 Кабинет: {esc(post['cabinet_name'])}"
+    author = await db.get_user(post["created_by"])
+    if author:
+        text += f"\n👤 Создал: {person(author)}"
     if post["last_error"]:
         text += f"\n⚠️ Последняя ошибка: {esc(post['last_error'])}"
     pid = post["id"]
@@ -323,8 +311,8 @@ async def _admin_post_card(target, post) -> None:
         [("👁 Превью", f"a:pv:{pid}")],
         [("▶️ Возобновить" if post["status"] == "stopped" else "⏹ Остановить", f"a:pst:{pid}")],
         [("🗑 Удалить", f"a:pdel:{pid}")],
+        [("⬅️ К рассылкам кабинета", f"a:cps:{post['cabinet_id']}")],
         [("🏪 К кабинету", f"a:cab:{post['cabinet_id']}")],
-        [("⬅️ Все рассылки", "a:posts:0")],
     ]))
 
 

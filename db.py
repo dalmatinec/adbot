@@ -477,10 +477,6 @@ async def list_posts(cabinet_id: int):
     return await all_(_POST + "WHERE p.cabinet_id=? ORDER BY p.id", (cabinet_id,))
 
 
-async def list_all_posts(offset: int = 0, limit: int = 8):
-    return await all_(_POST + "ORDER BY p.id DESC LIMIT ? OFFSET ?", (limit, offset))
-
-
 async def count_all_posts() -> int:
     return (await one("SELECT COUNT(*) AS n FROM posts"))["n"]
 

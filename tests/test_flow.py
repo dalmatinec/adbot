@@ -256,6 +256,9 @@ async def main() -> None:
 
     # владелец останавливает рассылку: партнёр уведомлён и сам возобновить не может
     await admin.post_open(Call(1, f"a:p:{p1}"))
+    assert "Акция ноября" in SCREEN[1][0] and "tg://user?id=50" in SCREEN[1][0]   # название партнёра и ссылка на него
+    await admin.cabinet_posts(Call(1, f"a:cps:{cab}"))
+    assert "tg://user?id=50" in SCREEN[1][0] and "a:menu" not in buttons(1)
     await admin.post_stop(Call(1, f"a:pst:{p1}"), BOT)
     assert (await db.get_post(p1))["status"] == "stopped"
     assert any(uid == 50 and "остановлена" in t for uid, t in BOT.sent)
@@ -300,7 +303,7 @@ async def main() -> None:
     # все экраны админки открываются
     for handler, data, extra in [
         (admin.cabinets, "a:cabs:0", (st(1),)), (admin.cabinet_open, f"a:cab:{cab}", (st(1),)),
-        (admin.cabinet_posts, f"a:cps:{cab}", ()), (admin.all_posts, "a:posts:0", ()),
+        (admin.cabinet_posts, f"a:cps:{cab}", ()),
         (admin.post_preview, f"a:pv:{p1}", (BOT,)), (admin.post_delete_ask, f"a:pdel:{p1}", ()),
         (admin.groups, "a:groups", ()), (admin.group_open, f"a:g:{g1}", ()),
         (admin.group_toggle, f"a:gpub:{g2}", ()), (admin.group_interval, f"a:gint:{g1}", ()),
