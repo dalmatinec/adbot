@@ -1,89 +1,91 @@
-"""Фоновая отправка рекламы. Все рассылки делает основной бот: он состоит в
-группах админом и копирует пост из канала-хранилища (copy_message), поэтому
-в режиме copy в группе нет пометки о пересылке, а посты не зависят от зеркал.
+"""Фоновая рассылка. Каждый активный пост пересылается в свою группу раз в
+интервал (свой у группы или общий), интервал задают только владельцы бота.
 
-Каждый активный пост уходит в свою группу раз в интервал (интервал группы
-или общий). Отправки идут по одной с паузой, чтобы не упереться в лимиты
-Telegram для групп (около 20 сообщений в минуту).
+Отправки идут строго по одной. Между любыми двумя отправками пауза не меньше
+SEND_GAP_SECONDS, между постами в одну группу не меньше GROUP_GAP_SECONDS,
+даже если десятки постов подошли одновременно.
 """
 
 import asyncio
 import logging
+import time
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 import config
 import db
+import notify
 import posts
-from notify import notify_owners
 
 log = logging.getLogger(__name__)
+
+_last_any = 0.0
+_last_group: dict[int, float] = {}
+
+_GONE = ("message to forward not found", "message_id_invalid", "messages to forward not found",
+         "message to copy not found")
+
+
+_GROUP_FAULT = ("forbidden", "chat not found", "not enough rights", "have no rights",
+                "chat_write_forbidden", "administrator", "kicked", "not a member")
+
+
+async def _wait_turn(group_id: int) -> None:
+    global _last_any
+    now = time.monotonic()
+    wait = max(_last_any + config.SEND_GAP_SECONDS - now,
+               _last_group.get(group_id, 0.0) + config.GROUP_GAP_SECONDS - now)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_any = _last_group[group_id] = time.monotonic()
 
 
 async def tick(bot) -> int:
     """Один проход: отправляет всё, что пора. Возвращает число успешных отправок."""
     sent = 0
-    mode = await db.get_setting("send_mode", "forward")  # forward | copy
     for post in await db.due_posts():
-        interval = await db.effective_interval(post["group_interval"])
-        ids = (post["id"], interval, post["group_id"], post["mirror_id"])
+        await _wait_turn(post["group_id"])
         try:
-            await _deliver(bot, post, mode)
+            await posts.send_post(bot, post["group_chat_id"], post)
         except TelegramRetryAfter as exc:
-            await db.delay_post(post["id"], int(exc.retry_after) + 1)
-            await asyncio.sleep(min(int(exc.retry_after), 30))
+            pause = int(exc.retry_after) + 1
+            await db.delay_post(post["id"], pause)
+            await asyncio.sleep(min(pause, 30))
             continue
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            await db.mark_failed(*ids, str(exc))
-            await _handle_send_error(bot, post, str(exc))
+            await _on_error(bot, post, str(exc))
             continue
         except Exception as exc:  # сеть и прочее: к группе претензий нет
             log.exception("Сбой отправки поста %s", post["id"])
-            await db.mark_failed(*ids, str(exc))
+            await db.mark_failed(post["id"], str(exc), retry_seconds=120)
             continue
-        await db.mark_sent(*ids)
+        await db.mark_sent(post["id"], await db.effective_interval(post["group_interval"]))
         await db.group_ok(post["group_id"])
         sent += 1
-        await asyncio.sleep(config.SEND_DELAY_SECONDS)
     return sent
 
 
-async def _deliver(bot, post, mode: str) -> None:
-    """forward: в группе пометка Переслано от с названием канала-хранилища.
-    copy: чистая копия без пометки. forwardMessage не принимает кнопки, поэтому
-    кнопки-ссылки добавляются отдельным вызовом (если Telegram не даст, пост
-    всё равно остаётся)."""
-    markup = posts.buttons_markup(post["buttons"])
-    if mode == "forward":
-        sent = await bot.forward_message(
-            chat_id=post["group_chat_id"], from_chat_id=post["storage_chat_id"],
-            message_id=post["storage_message_id"])
-        if markup:
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=post["group_chat_id"], message_id=sent.message_id, reply_markup=markup)
-            except Exception:
-                log.warning("Не удалось добавить кнопки к пересланному посту %s", post["id"], exc_info=True)
-    else:
-        await bot.copy_message(
-            chat_id=post["group_chat_id"], from_chat_id=post["storage_chat_id"],
-            message_id=post["storage_message_id"], reply_markup=markup)
-
-
-async def _handle_send_error(bot, post, error: str) -> None:
-    low = error.lower()
-    if "message to copy not found" in low or "message_id_invalid" in low:
-        # пост удалили из хранилища: ставим на паузу, чтобы не долбить впустую
+async def _on_error(bot, post, error: str) -> None:
+    await db.mark_failed(post["id"], error)
+    if any(marker in error.lower() for marker in _GONE):
+        # поста больше нет в хранилище: рассылать нечего
         await db.set_post_status(post["id"], "paused")
-        await notify_owners(
-            bot, f"Пост #{post['id']} ({post['title']}) не найден в хранилище и поставлен на паузу.")
+        text = (f"⚠️ Рассылка #{post['id']} поставлена на паузу: пост не найден в хранилище. "
+                "Замените пост в карточке рассылки.")
+        await notify.cabinet(bot, post["cabinet_id"], text)
+        await notify.owners(bot, f"⚠️ Рассылка #{post['id']} кабинета <b>{post['cabinet_name']}</b> "
+                                 "поставлена на паузу: пост не найден в хранилище.")
         return
+    if not any(marker in error.lower() for marker in _GROUP_FAULT):
+        return  # дело в самом посте, группа ни при чём: повтор позже
     streak = await db.group_fail(post["group_id"])
     if streak >= config.GROUP_ERRORS_BEFORE_DISABLE:
-        await db.set_group_active(post["group_id"], False)
-        await notify_owners(
-            bot, f"Группа {post['group_title']} отключена после {streak} ошибок подряд: {error}\n"
-                 "Проверьте, что бот состоит в чате и имеет право отправлять сообщения, затем включите группу в /adm.")
+        await db.set_group_flag(post["group_id"], "is_active", False)
+        await notify.owners(
+            bot, f"⚠️ Группа <b>{post['group_title']}</b> отключена после {streak} ошибок подряд.\n"
+                 f"Причина: {error}\n\n"
+                 "Проверьте, что бот состоит в группе и может отправлять сообщения, "
+                 "затем включите группу в админке.")
 
 
 async def run_scheduler(bot) -> None:

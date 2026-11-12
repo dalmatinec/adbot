@@ -1,7 +1,7 @@
 """Бэкап базы в отдельный канал (чтобы не засорять личку) и автоматический цикл.
 
 Копия делается через SQLite backup API (согласованный снимок при работающем
-боте) и сжимается. Токены зеркал в базе зашифрованы, ключ в бэкап не входит.
+боте) и сжимается.
 
 Восстановление и перенос: остановить контейнер, распаковать файл (gunzip) в
 data/adbot.db, запустить заново. Подробности в README.
@@ -46,13 +46,13 @@ async def send_backup(bot: Bot, chat_id: int) -> None:
 
 
 async def run_backups(bot: Bot) -> None:
-    """Раз в BACKUP_EVERY_HOURS шлёт бэкап в канал и чистит старые логи."""
+    """Раз в BACKUP_EVERY_HOURS шлёт бэкап в канал и чистит истёкшие ссылки."""
     if not config.BACKUP_CHAT_ID or config.BACKUP_EVERY_HOURS <= 0:
         return
     while True:
         await asyncio.sleep(config.BACKUP_EVERY_HOURS * 3600)
         try:
-            await db.cleanup_log(30)
+            await db.cleanup_invites()
             await send_backup(bot, config.BACKUP_CHAT_ID)
         except Exception:
             log.exception("Автоматический бэкап не удался")

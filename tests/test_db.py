@@ -1,108 +1,95 @@
-"""Проверка слоя данных без Telegram: python3 tests/test_db.py"""
+"""Проверка базы: python3 -m tests.test_db"""
 
 import asyncio
 import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault("OWNER_IDS", "1")
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "stubs"))
+sys.path.insert(0, os.path.dirname(HERE))
 
 import config  # noqa: E402
+config.OWNER_IDS[:] = [1]
 import db  # noqa: E402
 
 
 async def main() -> None:
-    config.OWNER_IDS[:] = [1]
-    path = os.path.join(tempfile.mkdtemp(), "t.db")
-    await db.init(path)
+    await db.init(os.path.join(tempfile.mkdtemp(), "t.db"))
+    assert db.is_owner(1) and not db.is_known(50)
 
-    assert await db.get_role(1) == "owner"
-    assert not await db.remove_owner(1)          # стартового владельца не убрать
-    await db.add_owner(2, "moderator")
-    assert await db.get_role(2) == "moderator"
+    # кабинет и вход по одноразовой ссылке
+    cab = await db.create_cabinet("Магазин")
+    token = await db.create_invite(cab, "owner")
+    assert (await db.use_invite("wrong", 50))[0] == "bad"
+    status, cabinet, prev = await db.use_invite(token, 50)
+    assert status == "ok" and cabinet["name"] == "Магазин" and prev is None
+    assert db.cabinet_of(50) == cab
+    assert (await db.use_invite(token, 51))[0] == "bad"          # ссылка сгорела
 
-    # зеркала: одно на пользователя и один бот один раз
-    m1 = await db.create_mirror(10, 1001, "a_bot", "enc")
-    assert m1
-    assert await db.create_mirror(10, 1002, "b_bot", "enc") is None   # тот же владелец
-    assert await db.create_mirror(11, 1001, "c_bot", "enc") is None   # тот же бот
-    m2 = await db.create_mirror(11, 1003, "d_bot", "enc")
-    assert m2 and (await db.get_mirror(m1))["slots"] == config.DEFAULT_SLOTS
+    # новая ссылка той же роли отменяет прежнюю
+    t1 = await db.create_invite(cab, "helper")
+    t2 = await db.create_invite(cab, "helper")
+    assert (await db.use_invite(t1, 60))[0] == "bad"
+    assert (await db.use_invite(t2, 60))[0] == "ok" and db.cabinet_of(60) == cab
 
-    # админы зеркала: максимум 3 вместе с создателем
-    assert await db.add_mirror_admin(m1, 20) == "ok"
-    assert await db.add_mirror_admin(m1, 20) == "exists"
-    assert await db.add_mirror_admin(m1, 10) == "owner"
-    assert await db.add_mirror_admin(m1, 21) == "ok"
-    assert await db.add_mirror_admin(m1, 22) == "limit"
-    assert await db.is_mirror_staff(m1, 21) and not await db.is_mirror_staff(m1, 22)
-    assert (await db.mirror_for_staff(21))["id"] == m1
-    assert sorted(await db.mirror_staff_ids(m1)) == [10, 20, 21]
+    # человек из одного кабинета не может войти в другой
+    cab2 = await db.create_cabinet("Другой")
+    t3 = await db.create_invite(cab2, "owner")
+    assert (await db.use_invite(t3, 50))[0] == "busy"
 
-    # слоты не выше потолка
-    assert await db.set_mirror_slots(m1, 99) == config.MAX_SLOTS
-    assert await db.set_mirror_slots(m1, 0) == 1
-    await db.set_mirror_slots(m1, 3)
+    # группы: скрытая не видна партнёру, видна при all_groups
+    g1 = await db.add_group(-1001, "Открытая")
+    g2 = await db.add_group(-1002, "Скрытая")
+    for g in (g1, g2):
+        await db.set_group_flag(g, "is_active", True)
+    await db.set_group_flag(g1, "is_public", True)
+    c = await db.get_cabinet(cab)
+    assert [g["id"] for g in await db.groups_for_cabinet(c)] == [g1]
+    await db.toggle_cabinet_all_groups(cab)
+    assert len(await db.groups_for_cabinet(await db.get_cabinet(cab))) == 2
 
-    # замена бота отозванного зеркала: посты и слоты сохраняются, занятый бот не принимается
-    await db.set_mirror_status(m2, "revoked")
-    assert not await db.replace_mirror_bot(m2, 1001, "x_bot", "enc2")      # 1001 занят зеркалом m1
-    assert await db.replace_mirror_bot(m2, 1099, "new_bot", "enc2")
-    row = await db.get_mirror(m2)
-    assert row["bot_id"] == 1099 and row["status"] == "active" and row["owner_id"] == 11
-
-    # группы и посты
-    g = await db.add_group(-100500, "Чат", active=True)
-    g2 = await db.add_group(-100501, "Чат 2", active=False)
-    assert [r["id"] for r in await db.list_groups(active_only=True)] == [g]
-    p = await db.create_post(m1, g, 10, "Реклама", -100999, 5, None, pending=False)
-    due = await db.due_posts()
-    assert [d["id"] for d in due] == [p] and due[0]["group_chat_id"] == -100500
-    iv = await db.effective_interval(due[0]["group_interval"])
-    assert iv == config.DEFAULT_INTERVAL_MINUTES
-    await db.mark_sent(p, iv, g, m1)
+    # пост, очередь, интервал
+    p = await db.create_post(cab, g1, 50, "Реклама", -100999, [5, 6])
+    assert [x["id"] for x in await db.due_posts()] == [p]
+    await db.mark_sent(p, 2)
     assert await db.due_posts() == []
-    assert (await db.get_post(p))["sent_count"] == 1
+    post = await db.get_post(p)
+    assert post["sent_count"] == 1 and post["storage_ids"] == "5,6"
+    assert await db.effective_interval(None) == config.DEFAULT_INTERVAL_HOURS
+    await db.set_setting("interval_hours", "4")
+    assert await db.effective_interval(None) == 4 and await db.effective_interval(1) == 1
 
-    # выключенная группа и заблокированное зеркало не отправляют
-    await db.delay_post(p, -5)
+    # заморозка кабинета и остановка поста убирают его из очереди
+    await db.delay_post(p, -1)
+    await db.set_cabinet_status(cab, "frozen")
+    assert await db.due_posts() == []
+    await db.set_cabinet_status(cab, "active")
+    await db.set_post_status(p, "stopped")
+    assert await db.due_posts() == []
+    await db.set_post_status(p, "active")
     assert len(await db.due_posts()) == 1
-    await db.set_group_active(g, False)
-    assert await db.due_posts() == []
-    await db.set_group_active(g, True)
-    await db.set_mirror_status(m1, "blocked")
-    assert await db.due_posts() == []
-    await db.set_mirror_status(m1, "active")
 
-    # модерация: пост ждёт одобрения, отчёт стартует с одобрения
-    pp = await db.create_post(m1, g2, 10, "На модерации", -100999, 6, None, pending=True)
-    assert (await db.get_post(pp))["started_at"] is None
-    await db.set_post_status(pp, "active")
-    assert (await db.get_post(pp))["started_at"] is not None
+    # смена владельца: рассылки остаются, прежний теряет доступ
+    t4 = await db.create_invite(cab, "owner")
+    status, _, prev = await db.use_invite(t4, 70)
+    assert status == "ok" and prev == 50
+    assert db.cabinet_of(70) == cab and db.cabinet_of(50) is None
+    assert await db.count_posts(cab) == 1
 
-    # бан блокирует зеркало, разбан возвращает
-    await db.ban_user(11)
-    assert (await db.get_mirror(m2))["status"] == "blocked"
-    await db.unban_user(11)
-    assert (await db.get_mirror(m2))["status"] == "active"
+    # слоты в пределах 1..MAX
+    assert await db.set_cabinet_slots(cab, 99) == config.MAX_SLOTS
+    assert await db.set_cabinet_slots(cab, 0) == 1
 
-    # ошибки группы
-    assert await db.group_fail(g) == 1 and await db.group_fail(g) == 2
-    await db.group_ok(g)
-    assert await db.group_fail(g) == 1
+    # последнего владельца бота убрать нельзя
+    assert not await db.remove_owner(1)
+    await db.add_owner(2)
+    assert await db.remove_owner(2)
 
-    stats = await db.overall_stats()
-    assert stats["mirrors"] == 2 and stats["posts_active"] == 2
+    # удаление кабинета уносит посты и доступы
+    await db.delete_cabinet(cab)
+    assert await db.count_all_posts() == 0 and db.cabinet_of(70) is None
 
-    # удаление зеркала каскадом удаляет админов и посты
-    await db.delete_mirror(m1)
-    assert await db.list_posts(m1) == [] and await db.list_mirror_admins(m1) == []
-
-    # снимок базы
-    snap = path + ".snap"
-    db.snapshot(snap)
-    assert os.path.getsize(snap) > 0
     print("db: все проверки пройдены")
 
 
