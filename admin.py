@@ -601,10 +601,9 @@ async def announce_send(message: Message, state: FSMContext, bot: Bot) -> None:
 @router.callback_query(F.data == "a:bk")
 async def backup_now(call: CallbackQuery, bot: Bot) -> None:
     await call.answer("Готовлю бэкап.")
-    target = config.BACKUP_CHAT_ID or call.from_user.id
     try:
-        await backup.send_backup(bot, target)
+        await backup.send_backup(bot, config.STORAGE_CHAT_ID)
     except Exception as exc:
         await call.message.answer(f"⚠️ Бэкап не удался: {esc(exc)}")
         return
-    await call.message.answer("✅ Бэкап отправлен " + ("в канал бэкапов." if config.BACKUP_CHAT_ID else "вам в личку."))
+    await call.message.answer("✅ Бэкап отправлен в хранилище.")

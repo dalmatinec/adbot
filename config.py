@@ -20,9 +20,8 @@ DB_PATH = os.getenv("DB_PATH", "data/adbot.db")
 
 # Приватный канал или группа, где лежат принятые посты. Бот там админ.
 STORAGE_CHAT_ID = _opt_int("STORAGE_CHAT_ID")
-# Приватный канал для бэкапов. Можно не задавать.
-BACKUP_CHAT_ID = _opt_int("BACKUP_CHAT_ID")
-BACKUP_EVERY_HOURS = int(os.getenv("BACKUP_EVERY_HOURS", "24"))
+# Бэкап базы уходит в то же хранилище, раз в неделю. 0 = не отправлять.
+BACKUP_EVERY_HOURS = int(os.getenv("BACKUP_EVERY_HOURS", "168"))
 
 DISPLAY_TZ = os.getenv("DISPLAY_TZ", "Asia/Almaty")
 DISPLAY_TZ_LABEL = os.getenv("DISPLAY_TZ_LABEL", "Алматы")

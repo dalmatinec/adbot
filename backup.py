@@ -1,4 +1,4 @@
-"""Бэкап базы в отдельный канал (чтобы не засорять личку) и автоматический цикл.
+"""Бэкап базы в хранилище постов (раз в неделю и по кнопке).
 
 Копия делается через SQLite backup API (согласованный снимок при работающем
 боте) и сжимается.
@@ -46,13 +46,13 @@ async def send_backup(bot: Bot, chat_id: int) -> None:
 
 
 async def run_backups(bot: Bot) -> None:
-    """Раз в BACKUP_EVERY_HOURS шлёт бэкап в канал и чистит истёкшие ссылки."""
-    if not config.BACKUP_CHAT_ID or config.BACKUP_EVERY_HOURS <= 0:
+    """Раз в BACKUP_EVERY_HOURS шлёт бэкап в хранилище и чистит истёкшие ссылки."""
+    if not config.STORAGE_CHAT_ID or config.BACKUP_EVERY_HOURS <= 0:
         return
     while True:
         await asyncio.sleep(config.BACKUP_EVERY_HOURS * 3600)
         try:
             await db.cleanup_invites()
-            await send_backup(bot, config.BACKUP_CHAT_ID)
+            await send_backup(bot, config.STORAGE_CHAT_ID)
         except Exception:
             log.exception("Автоматический бэкап не удался")
