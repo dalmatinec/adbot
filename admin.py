@@ -33,6 +33,7 @@ PAGE = 8
 
 class A(StatesGroup):
     cabinet_name = State()
+    group_id = State()
     rename = State()
     owner_id = State()
     announce = State()
@@ -51,7 +52,6 @@ async def menu(target) -> None:
         f"🏪 Кабинетов: {s['cabinets']}" + (f" (заморожено {s['frozen']})" if s["frozen"] else "") + "\n"
         f"📄 Рассылок: {s['posts']}, из них идёт {s['active']}\n"
         f"💬 Групп включено: {s['groups']}\n"
-        f"⏱ Общий интервал: {fmt_hours(await db.global_interval())}\n"
         f"📊 Всего отправок: {s['sent']}"
     ), kb([
         [("🏪 Кабинеты", "a:cabs:0"), ("🔎 Поиск", "a:find")],
@@ -76,12 +76,10 @@ async def settings(call: CallbackQuery, state: FSMContext) -> None:
     on = await report.enabled()
     await show(call, (
         "⚙️ <b>Настройки</b>\n\n"
-        f"⏱ Общий интервал: {fmt_hours(await db.global_interval())}\n"
         f"📊 Отчёт: {'каждый день в ' + str(await report.hour()) + ':00' if on else 'выключен'}\n"
         f"💾 Бэкап: раз в {config.BACKUP_EVERY_HOURS} ч. в хранилище"
     ), kb([
-        [("⏱ Интервал", "a:int"), ("📊 Отчёт", "a:rep")],
-        [("🎨 Оформление", "a:lk")],
+        [("🎨 Оформление", "a:lk"), ("📊 Отчёт", "a:rep")],
         [("👑 Владельцы", "a:own"), ("📜 Журнал", "a:log")],
         [("💾 Бэкап сейчас", "a:bk")],
         [("⬅️ Назад", "a:menu")],
@@ -222,19 +220,17 @@ async def _cabinet_card(target, cabinet_id: int) -> None:
         + (" (ссылка выдана)" if "helper" in invites else "") + "\n\n"
         f"📦 Рассылок: {used} из {c['slots']}\n"
         f"💬 Группы: {'все, включая скрытые' if c['all_groups'] else 'только открытые'}\n"
-        f"📅 Создан: {fmt_dt(c['created_at'])}"
+        f"📅 Создан: {fmt_dt(c['created_at'])}\n\n"
+        "Владелец: выдать ссылку или сменить человека. Помощник: ссылка второму человеку."
     )
     rows = [
-        [("📄 Рассылки кабинета", f"a:cps:{c['id']}")],
-        [("🔁 Сменить владельца" if owner else "🔗 Ссылка владельцу", f"a:clo:{c['id']}")],
-        [("🤝 Ссылка помощнику", f"a:clh:{c['id']}")],
-    ] + ([[("❌ Убрать помощника", f"a:crh:{c['id']}")]] if helper else []) + [
+        [("📄 Рассылки", f"a:cps:{c['id']}"), ("🔁 Владелец" if owner else "🔗 Владелец", f"a:clo:{c['id']}")],
+        [("🤝 Помощник", f"a:clh:{c['id']}")] + ([("❌ Убрать", f"a:crh:{c['id']}")] if helper else []),
         [("➖ Место", f"a:csl:{c['id']}:-1"), ("➕ Место", f"a:csl:{c['id']}:1")],
         [("💬 Группы: " + ("все" if c["all_groups"] else "открытые"), f"a:cag:{c['id']}")],
-        [("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{c['id']}")],
-        [("✏️ Переименовать", f"a:crn:{c['id']}")],
-        [("🗑 Удалить кабинет", f"a:cdel:{c['id']}")],
-        [("⬅️ К списку", "a:cabs:0")],
+        [("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{c['id']}"),
+         ("✏️ Имя", f"a:crn:{c['id']}")],
+        [("🗑 Удалить", f"a:cdel:{c['id']}"), ("⬅️ К списку", "a:cabs:0")],
     ]
     await show(target, text, kb(rows))
 
@@ -458,20 +454,92 @@ async def post_delete(call: CallbackQuery, bot: Bot) -> None:
 # ---------- группы ----------
 
 @router.callback_query(F.data == "a:groups")
-async def groups(call: CallbackQuery) -> None:
+async def groups(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _groups_list(call)
+
+
+async def _groups_list(target) -> None:
     items = await db.list_groups()
     rows = [[(f"{'🟢' if g['is_active'] else '⚪️'}{'' if g['is_public'] else '🔒'} "
-              f"{g['title'] or g['chat_id']} · {g['posts']}", f"a:g:{g['id']}")] for g in items]
+              f"{g['title'] or g['chat_id']} · {fmt_hours(g['interval_hours'] or config.DEFAULT_INTERVAL_HOURS)}",
+              f"a:g:{g['id']}")] for g in items]
+    rows.append([("➕ Добавить группу по ID", "a:gnew")])
     rows.append([("⬅️ Назад", "a:menu")])
-    await show(call, (
+    await show(target, (
         "💬 <b>Группы</b>\n\n"
         "🟢 рассылка включена, ⚪️ выключена, 🔒 скрыта от партнёров.\n"
-        "Число в конце: сколько рассылок идёт в группу.\n\n"
-        "Чтобы добавить группу, сделайте бота её администратором. Она появится здесь сама."
+        "В конце строки интервал рассылки в этой группе."
         if items else
-        "💬 <b>Группы</b>\n\nГрупп пока нет.\n"
-        "Сделайте бота администратором группы, и она появится здесь."
+        "💬 <b>Группы</b>\n\nГрупп пока нет. Добавьте группу по её ID."
     ), kb(rows))
+
+
+@router.callback_query(F.data == "a:gnew")
+async def group_new(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(A.group_id)
+    await show(call, (
+        "➕ <b>Добавить группу</b>\n\n"
+        "1. Сделайте бота администратором группы.\n"
+        "2. Пришлите сюда ID группы. Он выглядит так: <code>-1001234567890</code>\n\n"
+        "Узнать ID можно у @getidsbot. Бот проверит, что он состоит в группе и имеет права."
+    ), kb([[("⬅️ Назад", "a:groups")]]))
+
+
+@router.message(A.group_id)
+async def group_new_id(message: Message, state: FSMContext, bot: Bot) -> None:
+    raw = (message.text or "").strip().replace(" ", "")
+    if not raw.lstrip("-").isdigit():
+        await message.answer("ID группы должен быть числом, например -1001234567890. Пришлите ещё раз.")
+        return
+    ok, text, gid = await _add_group(bot, int(raw))
+    if not ok:
+        await message.answer(text + "\n\nИсправьте и пришлите ID ещё раз.",
+                             reply_markup=kb([[("⬅️ К группам", "a:groups")]]))
+        return
+    await state.clear()
+    await _log(message, text.split("\n")[0].replace("<b>", "").replace("</b>", "").lstrip("✅ "))
+    await message.answer(text)
+    await _group_card(message, gid)
+
+
+@router.callback_query(F.data.startswith("a:gadd:"))
+async def group_add_button(call: CallbackQuery, bot: Bot) -> None:
+    ok, text, gid = await _add_group(bot, _arg(call))
+    await call.answer()
+    await call.message.answer(text)
+    if ok:
+        await _log(call, text.split("\n")[0].replace("<b>", "").replace("</b>", "").lstrip("✅ "))
+        await _group_card(call.message, gid)
+
+
+async def _add_group(bot: Bot, chat_id: int) -> tuple[bool, str, int | None]:
+    """Проверяет, что бот состоит в группе администратором, и добавляет её.
+    Возвращает (успех, текст для владельца, id группы)."""
+    if chat_id == config.STORAGE_CHAT_ID:
+        return False, "⚠️ Это хранилище постов. В него рассылка не делается.", None
+    try:
+        chat = await bot.get_chat(chat_id)
+    except Exception:
+        return False, ("⚠️ Бот не видит чат с ID <code>%s</code>.\n"
+                       "Либо ID неверный, либо бота нет в этой группе." % chat_id), None
+    if chat.type not in ("group", "supergroup"):
+        return False, "⚠️ Это не группа. Рассылка делается только в группы.", None
+    try:
+        me = await bot.me()
+        member = await bot.get_chat_member(chat_id, me.id)
+        status = member.status
+    except Exception:
+        status = "left"
+    if status != "administrator":
+        return False, (f"⚠️ Бот найден в группе <b>{esc(chat.title)}</b>, но он не администратор.\n"
+                       "Выдайте ему права администратора."), None
+    if getattr(member, "can_post_messages", None) is False:
+        return False, f"⚠️ В группе <b>{esc(chat.title)}</b> боту запрещено отправлять сообщения.", None
+    gid = await db.add_group(chat_id, chat.title)
+    await db.set_group_flag(gid, "is_active", True)
+    return True, (f"✅ Группа <b>{esc(chat.title)}</b> добавлена, рассылка в неё включена.\n"
+                  "Сейчас она скрыта от партнёров. Откройте её в карточке, когда будете готовы."), gid
 
 
 async def _group_card(target, group_id: int) -> None:
@@ -479,8 +547,7 @@ async def _group_card(target, group_id: int) -> None:
     if not g:
         await show(target, "Группа не найдена.", kb([[("⬅️ Назад", "a:groups")]]))
         return
-    interval = (fmt_hours(g["interval_hours"]) if g["interval_hours"]
-                else f"общий ({fmt_hours(await db.global_interval())})")
+    interval = fmt_hours(g["interval_hours"] or config.DEFAULT_INTERVAL_HOURS)
     await show(target, (
         f"💬 <b>{esc(g['title'])}</b>\n"
         f"ID <code>{g['chat_id']}</code>\n\n"
@@ -488,11 +555,10 @@ async def _group_card(target, group_id: int) -> None:
         f"{'👁 Видна партнёрам' if g['is_public'] else '🔒 Скрыта от партнёров'}\n"
         f"⏱ Интервал: {interval}"
     ), kb([
-        [("⚪️ Выключить" if g["is_active"] else "🟢 Включить", f"a:gact:{g['id']}")],
-        [("🔒 Скрыть от партнёров" if g["is_public"] else "👁 Открыть партнёрам", f"a:gpub:{g['id']}")],
-        [("⏱ Интервал группы", f"a:gint:{g['id']}")],
-        [("🗑 Убрать группу", f"a:gdel:{g['id']}")],
-        [("⬅️ К списку", "a:groups")],
+        [("⚪️ Выключить" if g["is_active"] else "🟢 Включить", f"a:gact:{g['id']}"),
+         ("🔒 Скрыть" if g["is_public"] else "👁 Открыть", f"a:gpub:{g['id']}")],
+        [("⏱ Интервал", f"a:gint:{g['id']}")],
+        [("🗑 Убрать", f"a:gdel:{g['id']}"), ("⬅️ К списку", "a:groups")],
     ]))
 
 
@@ -515,14 +581,27 @@ async def group_toggle(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("a:gint:"))
 async def group_interval(call: CallbackQuery) -> None:
     gid = _arg(call)
-    hours = [(fmt_hours(h), f"a:gis:{gid}:{h}") for h in config.INTERVAL_CHOICES]
-    await show(call, "⏱ <b>Интервал группы</b>\n\nВыберите интервал для этой группы или оставьте общий.",
-               kb([hours[:4], hours[4:], [("Общий интервал", f"a:gis:{gid}:0")], [("⬅️ Назад", f"a:g:{gid}")]]))
+    g = await db.get_group(gid)
+    if not g:
+        return
+    current = g["interval_hours"] or config.DEFAULT_INTERVAL_HOURS
+    hours = [(("✅ " if h == current else "") + fmt_hours(h), f"a:gis:{gid}:{h}") for h in config.INTERVAL_CHOICES]
+    await show(call, (
+        f"⏱ <b>Интервал группы {esc(g['title'])}</b>\n\n"
+        f"Сейчас: {fmt_hours(current)}\n\n"
+        "С этим интервалом пересылается каждый пост в этой группе. Партнёры изменить его не могут.\n"
+        "Новый интервал применяется после очередной отправки поста."
+    ), kb([hours[:4], hours[4:], [("⬅️ Назад", f"a:g:{gid}")]]))
 
 
 @router.callback_query(F.data.startswith("a:gis:"))
 async def group_interval_set(call: CallbackQuery) -> None:
-    await db.set_group_interval(_arg(call), _arg(call, 3) or None)
+    hours = _arg(call, 3)
+    if hours in config.INTERVAL_CHOICES:
+        await db.set_group_interval(_arg(call), hours)
+        g = await db.get_group(_arg(call))
+        if g:
+            await _log(call, f"группа {g['title']}: интервал {fmt_hours(hours)}")
     await _group_card(call, _arg(call))
 
 
@@ -540,7 +619,7 @@ async def group_delete_ask(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("a:gdelc:"))
 async def group_delete(call: CallbackQuery) -> None:
     await db.delete_group(_arg(call))
-    await groups(call)
+    await _groups_list(call)
 
 
 @events.my_chat_member(F.chat.type.in_({"group", "supergroup"}))
@@ -548,47 +627,20 @@ async def on_my_member(event: ChatMemberUpdated, bot: Bot) -> None:
     status = event.new_chat_member.status
     chat = event.chat
     if status in ("administrator", "member"):
-        if not db.is_owner(event.from_user.id) and not await db.get_group_by_chat(chat.id):
-            # бота добавил посторонний: в чужих чатах он не работает
-            try:
-                await bot.leave_chat(chat.id)
-            except Exception:
-                pass
-            return
         known = await db.get_group_by_chat(chat.id)
-        await db.add_group(chat.id, chat.title)
-        if known is None:
-            warn = "" if status == "administrator" else "\n⚠️ Бот не администратор: писать в группу он не сможет."
-            await notify.owners(bot, f"➕ Бот добавлен в группу <b>{esc(chat.title)}</b>.{warn}\n\n"
-                                     "Включите её: Админка, раздел Группы.")
+        if known:
+            await db.add_group(chat.id, chat.title)   # обновляем название
+        elif chat.id != config.STORAGE_CHAT_ID and status == "administrator":
+            # сами группу не добавляем: владелец решает, нужна ли она в списке
+            await notify.owners(
+                bot, f"➕ Бот стал администратором группы <b>{esc(chat.title)}</b>\n"
+                     f"ID <code>{chat.id}</code>\n\nДобавить её в список групп для рассылки?",
+                kb([[("➕ Добавить группу", f"a:gadd:{chat.id}")]]))
     elif status in ("left", "kicked"):
         group = await db.get_group_by_chat(chat.id)
         if group and group["is_active"]:
             await db.set_group_flag(group["id"], "is_active", False)
             await notify.owners(bot, f"➖ Бота убрали из группы <b>{esc(chat.title)}</b>. Рассылка в неё выключена.")
-
-
-# ---------- интервал ----------
-
-@router.callback_query(F.data == "a:int")
-async def interval(call: CallbackQuery) -> None:
-    current = await db.global_interval()
-    hours = [(("✅ " if h == current else "") + fmt_hours(h), f"a:ints:{h}") for h in config.INTERVAL_CHOICES]
-    await show(call, (
-        "⏱ <b>Общий интервал рассылки</b>\n\n"
-        f"Сейчас: {fmt_hours(current)}\n\n"
-        "С этим интервалом пересылается каждый пост. Партнёры изменить его не могут.\n"
-        "Новый интервал применяется после очередной отправки поста."
-    ), kb([hours[:4], hours[4:], [("⬅️ Назад", "a:set")]]))
-
-
-@router.callback_query(F.data.startswith("a:ints:"))
-async def interval_set(call: CallbackQuery) -> None:
-    hours = _arg(call)
-    if hours in config.INTERVAL_CHOICES:
-        await db.set_setting("interval_hours", str(hours))
-        await _log(call, f"общий интервал: {fmt_hours(hours)}")
-    await interval(call)
 
 
 # ---------- владельцы ----------

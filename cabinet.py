@@ -57,8 +57,7 @@ async def home(target: Message | CallbackQuery) -> None:
     else:
         items = await db.list_posts(cabinet["id"])
         live = sum(1 for p in items if p["status"] == "active")
-        text = look.text("home", name=esc(cabinet["name"]), used=len(items), slots=cabinet["slots"],
-                         live=live, interval=fmt_hours(await db.global_interval()))
+        text = look.text("home", name=esc(cabinet["name"]), used=len(items), slots=cabinet["slots"], live=live)
         rows.append([look.btn("new", "c:new")])
         rows.append([look.btn("posts", "c:posts")])
         rows.append([look.btn("people", "c:people")])

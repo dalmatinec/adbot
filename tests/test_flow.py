@@ -40,8 +40,20 @@ class FakeBot:
     def _check(self, text):
         assert not any(ch in text for ch in BAD), text
 
+    chats = {-1009: ("supergroup", "Новая группа", "administrator"),
+             -1008: ("supergroup", "Без прав", "member"), -1007: ("channel", "Канал", "administrator")}
+
     async def me(self):
-        return type("Me", (), {"username": "main_bot"})()
+        return type("Me", (), {"username": "main_bot", "id": 999})()
+
+    async def get_chat(self, chat_id):
+        if chat_id not in self.chats:
+            raise TelegramBadRequest("Bad Request: chat not found")
+        kind, title, _ = self.chats[chat_id]
+        return type("Chat", (), {"id": chat_id, "type": kind, "title": title})()
+
+    async def get_chat_member(self, chat_id, user_id):
+        return type("Member", (), {"status": self.chats[chat_id][2]})()
 
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         self._check(text)
@@ -360,15 +372,25 @@ async def main() -> None:
     await admin.journal(Call(1, "a:log"))
     assert "создал кабинет Магазин Ромашка" in SCREEN[1][0] and "остановил рассылку" in SCREEN[1][0]
 
+    # группы добавляются по ID с проверкой прав бота
+    await admin.group_new(Call(1, "a:gnew"), st(1))
+    for bad, why in ((-1, "не видит"), (-1008, "не администратор"), (-1007, "не группа"), (-100999, "хранилище")):
+        await admin.group_new_id(Msg(1, str(bad)), st(1), BOT)
+        assert why in SCREEN[1][0], (bad, SCREEN[1][0])
+        assert await db.get_group_by_chat(bad) is None
+    await admin.group_new_id(Msg(1, "-1009"), st(1), BOT)
+    added = await db.get_group_by_chat(-1009)
+    assert added and added["is_active"] == 1 and added["is_public"] == 0 and "Новая группа" in SCREEN[1][0]
+    await db.delete_group(added["id"])
+
     # все экраны админки открываются
     for handler, data, extra in [
         (admin.cabinets, "a:cabs:0", (st(1),)), (admin.cabinet_open, f"a:cab:{cab}", (st(1),)),
         (admin.cabinet_posts, f"a:cps:{cab}", ()),
         (admin.post_preview, f"a:pv:{p1}", (BOT,)), (admin.post_delete_ask, f"a:pdel:{p1}", ()),
-        (admin.groups, "a:groups", ()), (admin.group_open, f"a:g:{g1}", ()),
+        (admin.groups, "a:groups", (st(1),)), (admin.group_new, "a:gnew", (st(1),)), (admin.group_open, f"a:g:{g1}", ()),
         (admin.group_toggle, f"a:gpub:{g2}", ()), (admin.group_interval, f"a:gint:{g1}", ()),
         (admin.group_interval_set, f"a:gis:{g1}:4", ()), (admin.group_delete_ask, f"a:gdel:{g2}", ()),
-        (admin.interval, "a:int", ()), (admin.interval_set, "a:ints:3", ()),
         (admin.owners, "a:own", (st(1),)), (admin.owner_add, "a:oadd", (st(1),)),
         (admin.announce, "a:bc", (st(1),)), (admin.cabinet_slots, f"a:csl:{cab}:1", ()),
         (admin.cabinet_all_groups, f"a:cag:{cab}", ()), (admin.cabinet_rename, f"a:crn:{cab}", (st(1),)),
@@ -386,7 +408,8 @@ async def main() -> None:
     for key in look.TEXTS:                                # каждый текст открывается в редакторе
         await admin.look_text_open(Call(1, f"a:lt:{key}"), st(1))
         assert "{" not in SCREEN[1][0].split("➖➖➖➖➖➖")[1], key
-    assert await db.global_interval() == 3 and (await db.get_group(g1))["interval_hours"] == 4
+    assert (await db.get_group(g1))["interval_hours"] == 4
+    assert await db.effective_interval(None) == config.DEFAULT_INTERVAL_HOURS
     assert (await db.get_group(g2))["is_public"] == 1
 
     # владелец бота со своим кабинетом видит кнопку админки

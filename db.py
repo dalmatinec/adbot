@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS groups (
     title          TEXT,
     is_active      INTEGER NOT NULL DEFAULT 0,   -- рассылка в группу включена
     is_public      INTEGER NOT NULL DEFAULT 0,   -- группа видна партнёрам
-    interval_hours INTEGER,                      -- NULL = общий интервал
+    interval_hours INTEGER,                      -- NULL = интервал по умолчанию
     error_streak   INTEGER NOT NULL DEFAULT 0,
     added_at       TEXT NOT NULL
 );
@@ -255,13 +255,9 @@ async def bump(key: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", (key,))
 
 
-async def global_interval() -> int:
-    return int(await get_setting("interval_hours", str(config.DEFAULT_INTERVAL_HOURS)))
-
-
 async def effective_interval(group_interval: int | None) -> int:
-    """Интервал в часах: свой у группы или общий."""
-    return group_interval or await global_interval()
+    """Интервал группы в часах. Общего интервала нет: у каждой группы свой."""
+    return group_interval or config.DEFAULT_INTERVAL_HOURS
 
 
 # ---------- пользователи и владельцы ----------

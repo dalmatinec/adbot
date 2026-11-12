@@ -57,8 +57,7 @@ async def main() -> None:
     post = await db.get_post(p)
     assert post["sent_count"] == 1 and post["storage_ids"] == "5,6"
     assert await db.effective_interval(None) == config.DEFAULT_INTERVAL_HOURS
-    await db.set_setting("interval_hours", "4")
-    assert await db.effective_interval(None) == 4 and await db.effective_interval(1) == 1
+    assert await db.effective_interval(4) == 4
 
     # заморозка кабинета и остановка поста убирают его из очереди
     await db.delay_post(p, -1)
