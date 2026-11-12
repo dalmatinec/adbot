@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS posts (
     group_id        INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     created_by      INTEGER NOT NULL,
     title           TEXT NOT NULL,
+    named           INTEGER NOT NULL DEFAULT 0,  -- 1 = название задано вручную
     storage_chat_id INTEGER NOT NULL,
     storage_ids     TEXT NOT NULL,               -- id сообщений через запятую (альбом = несколько)
     status          TEXT NOT NULL DEFAULT 'active',  -- active | paused | stopped
@@ -172,6 +173,9 @@ async def init(path: str | None = None) -> None:
     _conn.execute("PRAGMA busy_timeout=30000")
     _conn.execute("PRAGMA cache_size=-4000")   # до 4 МБ кэша страниц
     _conn.executescript(SCHEMA)
+    columns = {r["name"] for r in _conn.execute("PRAGMA table_info(posts)")}
+    if "named" not in columns:   # база, созданная до появления названий
+        _conn.execute("ALTER TABLE posts ADD COLUMN named INTEGER NOT NULL DEFAULT 0")
     for uid in config.OWNER_IDS:
         _conn.execute("INSERT OR IGNORE INTO owners(user_id, added_at) VALUES (?, ?)", (uid, now()))
     _conn.commit()
@@ -482,10 +486,16 @@ async def count_all_posts() -> int:
 
 
 async def replace_post_content(post_id: int, title: str, storage_chat_id: int, storage_ids: list[int]) -> None:
-    """Замена содержимого: расписание и счётчики остаются."""
+    """Замена содержимого: расписание и счётчики остаются. Название, заданное
+    вручную, тоже остаётся."""
     await execute(
-        "UPDATE posts SET title=?, storage_chat_id=?, storage_ids=?, last_error=NULL WHERE id=?",
+        "UPDATE posts SET title=CASE WHEN named=1 THEN title ELSE ? END, "
+        "storage_chat_id=?, storage_ids=?, last_error=NULL WHERE id=?",
         (title, storage_chat_id, ",".join(map(str, storage_ids)), post_id))
+
+
+async def rename_post(post_id: int, title: str) -> None:
+    await execute("UPDATE posts SET title=?, named=1 WHERE id=?", (title, post_id))
 
 
 async def set_post_status(post_id: int, status: str) -> None:

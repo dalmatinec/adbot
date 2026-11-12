@@ -221,6 +221,14 @@ async def main() -> None:
     assert post["title"] == "Новый текст" and post["sent_count"] == 1 and post["storage_ids"] != old_ids
     assert BOT.deleted[-1] == (-100999, [int(old_ids)])
 
+    # название: задаётся вручную и переживает замену поста
+    await cabinet.post_rename(Call(50, f"c:pn:{p1}"), st(50))
+    await cabinet.post_rename_done(Msg(50, "Акция ноября"), st(50))
+    assert (await db.get_post(p1))["title"] == "Акция ноября" and "Акция ноября" in SCREEN[50][0]
+    await cabinet.replace_start(Call(50, f"c:rep:{p1}"), st(50))
+    await cabinet.got_post(Msg(50, "Совсем другой текст"), st(50), BOT)
+    assert (await db.get_post(p1))["title"] == "Акция ноября"
+
     # чужую рассылку открыть нельзя
     cab_b = await db.create_cabinet("Чужой")
     await db.use_invite(await db.create_invite(cab_b, "owner"), 60)

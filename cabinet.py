@@ -29,6 +29,7 @@ _albums: dict[tuple[int, str], list[int]] = {}
 class S(StatesGroup):
     post = State()      # ждём пост (новый или на замену)
     group = State()     # ждём выбор группы
+    name = State()      # ждём название рассылки
 
 
 async def _cabinet(user_id: int):
@@ -290,8 +291,10 @@ async def _create(message: Message, bot: Bot, cabinet, group_id: int, title: str
         f"✅ <b>Рассылка #{post_id} запущена</b>\n\n"
         f"💬 Группа: {esc(group['title'])}\n"
         f"⏱ Интервал: {fmt_hours(interval)}\n\n"
-        "Первая отправка в течение минуты.",
-        reply_markup=kb([[("📄 Открыть рассылку", f"c:p:{post_id}")], [("🏠 В кабинет", "c:home")]]))
+        "Первая отправка в течение минуты.\n"
+        "Чтобы легко находить рассылку в списке, задайте ей название.",
+        reply_markup=kb([[("✏️ Задать название", f"c:pn:{post_id}")],
+                         [("📄 Открыть рассылку", f"c:p:{post_id}")], [("🏠 В кабинет", "c:home")]]))
 
 
 # ---------- мои рассылки ----------
@@ -340,6 +343,7 @@ async def _post_card(target, post) -> None:
         rows.append([("⏸ Пауза", f"c:pt:{post['id']}")])
     elif post["status"] == "paused":
         rows.append([("▶️ Возобновить", f"c:pt:{post['id']}")])
+    rows.append([("✏️ Название", f"c:pn:{post['id']}")])
     rows.append([("🗑 Удалить", f"c:pd:{post['id']}")])
     rows.append([("⬅️ К списку", "c:posts")])
     text = await post_text(post)
@@ -354,6 +358,37 @@ async def post_open(call: CallbackQuery, state: FSMContext) -> None:
     post = await _own_post(call)
     if post:
         await _post_card(call, post)
+
+
+@router.callback_query(F.data.startswith("c:pn:"))
+async def post_rename(call: CallbackQuery, state: FSMContext) -> None:
+    post = await _own_post(call)
+    if not post:
+        return
+    await state.set_state(S.name)
+    await state.set_data({"post_id": post["id"]})
+    await show(call, (
+        f"✏️ <b>Название рассылки #{post['id']}</b>\n\n"
+        f"Сейчас: {esc(post['title'])}\n\n"
+        "Пришлите новое название, до 40 символов. Его видите только вы и администрация, "
+        "в группу оно не попадает."
+    ), kb([[("⬅️ Назад", f"c:p:{post['id']}")]]))
+
+
+@router.message(S.name)
+async def post_rename_done(message: Message, state: FSMContext) -> None:
+    name = " ".join((message.text or "").split())
+    if not name or name.startswith("/") or len(name) > 40:
+        await message.answer("Название должно быть текстом до 40 символов. Пришлите ещё раз.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    post = await db.get_post(data["post_id"])
+    if not post or post["cabinet_id"] != db.cabinet_of(message.from_user.id):
+        await message.answer("Рассылка не найдена.")
+        return
+    await db.rename_post(post["id"], name)
+    await _post_card(message, await db.get_post(post["id"]))
 
 
 @router.callback_query(F.data.startswith("c:pv:"))
