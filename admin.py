@@ -160,12 +160,12 @@ async def _cabinet_card(target, cabinet_id: int) -> None:
     rows = [
         [("📄 Рассылки кабинета", f"a:cps:{c['id']}")],
         [("🔁 Сменить владельца" if owner else "🔗 Ссылка владельцу", f"a:clo:{c['id']}")],
-        [("🤝 Ссылка помощнику", f"a:clh:{c['id']}")]
-        + ([("❌ Убрать помощника", f"a:crh:{c['id']}")] if helper else []),
+        [("🤝 Ссылка помощнику", f"a:clh:{c['id']}")],
+    ] + ([[("❌ Убрать помощника", f"a:crh:{c['id']}")]] if helper else []) + [
         [("➖ Место", f"a:csl:{c['id']}:-1"), ("➕ Место", f"a:csl:{c['id']}:1")],
         [("💬 Группы: " + ("все" if c["all_groups"] else "открытые"), f"a:cag:{c['id']}")],
-        [("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{c['id']}"),
-         ("✏️ Переименовать", f"a:crn:{c['id']}")],
+        [("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{c['id']}")],
+        [("✏️ Переименовать", f"a:crn:{c['id']}")],
         [("🗑 Удалить кабинет", f"a:cdel:{c['id']}")],
         [("⬅️ К списку", "a:cabs:0")],
     ]
@@ -323,7 +323,8 @@ async def _admin_post_card(target, post) -> None:
         [("👁 Превью", f"a:pv:{pid}")],
         [("▶️ Возобновить" if post["status"] == "stopped" else "⏹ Остановить", f"a:pst:{pid}")],
         [("🗑 Удалить", f"a:pdel:{pid}")],
-        [("🏪 К кабинету", f"a:cab:{post['cabinet_id']}"), ("⬅️ Все рассылки", "a:posts:0")],
+        [("🏪 К кабинету", f"a:cab:{post['cabinet_id']}")],
+        [("⬅️ Все рассылки", "a:posts:0")],
     ]))
 
 

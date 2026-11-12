@@ -67,7 +67,8 @@ async def home(target: Message | CallbackQuery) -> None:
             "Выберите действие."
         )
         rows.append([("➕ Новая рассылка", "c:new")])
-        rows.append([("📋 Мои рассылки", "c:posts"), ("👥 Доступ", "c:people")])
+        rows.append([("📋 Мои рассылки", "c:posts")])
+        rows.append([("👥 Доступ", "c:people")])
         rows.append([("ℹ️ Как это работает", "c:help")])
     if db.is_owner(uid):
         rows.append([("⚙️ Админка", "a:menu")])
@@ -225,7 +226,13 @@ async def got_post(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         stored = await posts.store(bot, message.chat.id, ids)
     except posts.IngestError as exc:
-        await message.answer(f"⚠️ {esc(exc)}")
+        text = f"⚠️ {esc(exc)}"
+        reason = getattr(exc, "reason", None)
+        if reason and db.is_owner(message.from_user.id):
+            text += f"\n\nПричина (видна только владельцам бота):\n<code>{esc(reason)}</code>"
+        await message.answer(text)
+        if reason:
+            await notify.owners(bot, f"⚠️ Пост не принят: бот не смог переслать его в хранилище.\n<code>{esc(reason)}</code>")
         return
     title = posts.post_title(message)
 
@@ -328,7 +335,7 @@ async def post_text(post) -> str:
 
 
 async def _post_card(target, post) -> None:
-    rows = [[("👁 Превью", f"c:pv:{post['id']}"), ("🔄 Заменить пост", f"c:rep:{post['id']}")]]
+    rows = [[("👁 Превью", f"c:pv:{post['id']}")], [("🔄 Заменить пост", f"c:rep:{post['id']}")]]
     if post["status"] == "active":
         rows.append([("⏸ Пауза", f"c:pt:{post['id']}")])
     elif post["status"] == "paused":

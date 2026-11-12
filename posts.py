@@ -46,13 +46,15 @@ async def store(bot, chat_id: int, message_ids: list[int]) -> list[int]:
     try:
         return await forward(bot, config.STORAGE_CHAT_ID, chat_id, message_ids)
     except Exception as exc:
-        log.exception("Не удалось сохранить пост в хранилище")
+        log.error("ПРИЧИНА: пост не сохранён в хранилище %s: %s", config.STORAGE_CHAT_ID, exc)
         low = str(exc).lower()
         if "can't be forwarded" in low or "protected" in low or "noforwards" in low:
             raise IngestError("Этот пост нельзя переслать: в источнике запрещена пересылка.") from exc
-        raise IngestError(
+        error = IngestError(
             "Не удалось принять пост. Повторите попытку. Если ошибка повторяется, "
-            "обратитесь к администрации.") from exc
+            "обратитесь к администрации.")
+        error.reason = str(exc)
+        raise error from exc
 
 
 def ids_of(post) -> list[int]:
