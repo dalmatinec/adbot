@@ -13,6 +13,8 @@ import backup
 import cabinet
 import config
 import db
+import look
+import report
 from middlewares import GuardMiddleware
 from scheduler import run_scheduler
 
@@ -24,6 +26,7 @@ async def main() -> None:
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
     config.validate()
     await db.init()
+    await look.load()
 
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
@@ -41,6 +44,7 @@ async def main() -> None:
     background = [
         asyncio.create_task(run_scheduler(bot), name="scheduler"),
         asyncio.create_task(backup.run_backups(bot), name="backups"),
+        asyncio.create_task(report.run(bot), name="report"),
     ]
     try:
         await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)

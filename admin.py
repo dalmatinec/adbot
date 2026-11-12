@@ -13,8 +13,10 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 import backup
 import config
 import db
+import look
 import notify
 import posts
+import report
 from cabinet import post_text
 from ui import POST_ICON, esc, fmt_dt, fmt_hours, kb, person, show
 
@@ -34,6 +36,10 @@ class A(StatesGroup):
     rename = State()
     owner_id = State()
     announce = State()
+    search = State()
+    look_text = State()
+    look_btn_text = State()
+    look_btn_icon = State()
 
 
 # ---------- меню ----------
@@ -48,11 +54,71 @@ async def menu(target) -> None:
         f"⏱ Общий интервал: {fmt_hours(await db.global_interval())}\n"
         f"📊 Всего отправок: {s['sent']}"
     ), kb([
-        [("🏪 Кабинеты", "a:cabs:0")],
-        [("💬 Группы", "a:groups"), ("⏱ Интервал", "a:int")],
-        [("👑 Владельцы", "a:own"), ("📣 Объявление", "a:bc")],
-        [("💾 Бэкап", "a:bk")],
+        [("🏪 Кабинеты", "a:cabs:0"), ("🔎 Поиск", "a:find")],
+        [("💬 Группы", "a:groups")],
+        [("📣 Объявление партнёрам", "a:bc")],
+        [("⚙️ Настройки", "a:set")],
     ]))
+
+
+async def _log(event, text: str) -> None:
+    await db.log_action(event.from_user.id, text)
+
+
+@router.callback_query(F.data == "a:noop")
+async def noop(call: CallbackQuery) -> None:
+    await call.answer()
+
+
+@router.callback_query(F.data == "a:set")
+async def settings(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    on = await report.enabled()
+    await show(call, (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"⏱ Общий интервал: {fmt_hours(await db.global_interval())}\n"
+        f"📊 Отчёт: {'каждый день в ' + str(await report.hour()) + ':00' if on else 'выключен'}\n"
+        f"💾 Бэкап: раз в {config.BACKUP_EVERY_HOURS} ч. в хранилище"
+    ), kb([
+        [("⏱ Интервал", "a:int"), ("📊 Отчёт", "a:rep")],
+        [("🎨 Оформление", "a:lk")],
+        [("👑 Владельцы", "a:own"), ("📜 Журнал", "a:log")],
+        [("💾 Бэкап сейчас", "a:bk")],
+        [("⬅️ Назад", "a:menu")],
+    ]))
+
+
+# ---------- поиск ----------
+
+@router.callback_query(F.data == "a:find")
+async def find(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(A.search)
+    await show(call, (
+        "🔎 <b>Поиск</b>\n\n"
+        "Пришлите, что искать:\n"
+        "• название кабинета или его часть\n"
+        "• имя, юзернейм или ID человека\n"
+        "• название или номер рассылки"
+    ), kb([[("⬅️ Назад", "a:menu")]]))
+
+
+@router.message(A.search)
+async def find_run(message: Message, state: FSMContext) -> None:
+    query = (message.text or "").strip()
+    if not query or query.startswith("/"):
+        return
+    cabs, found = await db.search(query)
+    rows = [[(f"{'❄️' if c['status'] != 'active' else '🏪'} {c['name']}", f"a:cab:{c['id']}")] for c in cabs]
+    rows += [[(f"{POST_ICON[p['status']]} #{p['id']} {p['title']} · {p['cabinet_name']}"[:60], f"a:p:{p['id']}")]
+             for p in found]
+    rows.append([("⬅️ В админку", "a:menu")])
+    if cabs or found:
+        text = (f"🔎 <b>Результаты поиска</b>\nЗапрос: {esc(query)}\n\n"
+                f"🏪 Кабинетов: {len(cabs)}\n📄 Рассылок: {len(found)}\n\n"
+                "Можно прислать новый запрос.")
+    else:
+        text = f"🔎 По запросу <b>{esc(query)}</b> ничего не найдено.\n\nПришлите другой запрос."
+    await show(message, text, kb(rows))
 
 
 @router.message(Command("adm"))
@@ -115,6 +181,7 @@ async def cabinet_new_name(message: Message, state: FSMContext, bot: Bot) -> Non
     await state.clear()
     cid = await db.create_cabinet(name)
     token = await db.create_invite(cid, "owner")
+    await _log(message, f"создал кабинет {name}")
     await message.answer(await _link_text(bot, name, token, "owner"))
     await _cabinet_card(message, cid)
 
@@ -186,6 +253,7 @@ async def cabinet_link(call: CallbackQuery, bot: Bot) -> None:
         return
     role = "owner" if call.data.startswith("a:clo:") else "helper"
     token = await db.create_invite(cid, role)
+    await _log(call, f"выдал ссылку {'владельца' if role == 'owner' else 'помощника'}: {cabinet['name']}")
     await call.answer()
     text = await _link_text(bot, cabinet["name"], token, role)
     if role == "owner":
@@ -230,6 +298,7 @@ async def cabinet_freeze(call: CallbackQuery, bot: Bot) -> None:
         return
     frozen = cabinet["status"] == "active"
     await db.set_cabinet_status(cid, "frozen" if frozen else "active")
+    await _log(call, f"{'заморозил' if frozen else 'разморозил'} кабинет {cabinet['name']}")
     await notify.cabinet(bot, cid, (
         "❄️ Кабинет заморожен администрацией. Рассылки приостановлены." if frozen
         else "✅ Кабинет разморожен. Рассылки продолжаются."))
@@ -271,6 +340,9 @@ async def cabinet_delete_ask(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("a:cdelc:"))
 async def cabinet_delete(call: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     cid = _arg(call)
+    gone = await db.get_cabinet(cid)
+    if gone:
+        await _log(call, f"удалил кабинет {gone['name']}")
     await notify.cabinet(bot, cid, "Ваш кабинет удалён администрацией.")
     await db.delete_cabinet(cid)
     await state.clear()
@@ -352,6 +424,7 @@ async def post_stop(call: CallbackQuery, bot: Bot) -> None:
         return
     stop = post["status"] != "stopped"
     await db.set_post_status(post["id"], "stopped" if stop else "active")
+    await _log(call, f"{'остановил' if stop else 'возобновил'} рассылку #{post['id']} ({post['cabinet_name']})")
     await notify.cabinet(bot, post["cabinet_id"], (
         f"⏹ Рассылка #{post['id']} остановлена администрацией. Свяжитесь с администрацией для уточнения."
         if stop else f"▶️ Рассылка #{post['id']} возобновлена администрацией."))
@@ -376,6 +449,7 @@ async def post_delete(call: CallbackQuery, bot: Bot) -> None:
     if not post:
         return
     await db.delete_post(post["id"])
+    await _log(call, f"удалил рассылку #{post['id']} ({post['cabinet_name']})")
     await posts.drop_stored(bot, post["storage_chat_id"], posts.ids_of(post))
     await notify.cabinet(bot, post["cabinet_id"], f"🗑 Рассылка #{post['id']} удалена администрацией.")
     await _cabinet_posts(call, post["cabinet_id"])
@@ -433,6 +507,8 @@ async def group_toggle(call: CallbackQuery) -> None:
     if g:
         field = "is_active" if call.data.startswith("a:gact:") else "is_public"
         await db.set_group_flag(g["id"], field, not g[field])
+        await _log(call, f"группа {g['title']}: {'рассылка' if field == 'is_active' else 'видимость'} "
+                         f"{'выкл' if g[field] else 'вкл'}")
     await _group_card(call, _arg(call))
 
 
@@ -503,7 +579,7 @@ async def interval(call: CallbackQuery) -> None:
         f"Сейчас: {fmt_hours(current)}\n\n"
         "С этим интервалом пересылается каждый пост. Партнёры изменить его не могут.\n"
         "Новый интервал применяется после очередной отправки поста."
-    ), kb([hours[:4], hours[4:], [("⬅️ Назад", "a:menu")]]))
+    ), kb([hours[:4], hours[4:], [("⬅️ Назад", "a:set")]]))
 
 
 @router.callback_query(F.data.startswith("a:ints:"))
@@ -511,6 +587,7 @@ async def interval_set(call: CallbackQuery) -> None:
     hours = _arg(call)
     if hours in config.INTERVAL_CHOICES:
         await db.set_setting("interval_hours", str(hours))
+        await _log(call, f"общий интервал: {fmt_hours(hours)}")
     await interval(call)
 
 
@@ -524,7 +601,7 @@ async def owners(call: CallbackQuery, state: FSMContext) -> None:
     rows = [[(f"❌ Убрать {o['full_name'] or o['user_id']}", f"a:odel:{o['user_id']}")]
             for o in items if o["user_id"] != call.from_user.id]
     rows.append([("➕ Добавить владельца", "a:oadd")])
-    rows.append([("⬅️ Назад", "a:menu")])
+    rows.append([("⬅️ Назад", "a:set")])
     await show(call, "👑 <b>Владельцы бота</b>\n\n" + "\n".join(lines)
                      + "\n\nВладельцы имеют полный доступ к админке.", kb(rows))
 
@@ -544,6 +621,7 @@ async def owner_add_done(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await db.add_owner(int(raw))
+    await _log(message, f"добавил владельца {raw}")
     await message.answer(f"✅ Владелец <code>{raw}</code> добавлен. Ему нужно открыть бота и нажать /start.",
                          reply_markup=kb([[("⬅️ К владельцам", "a:own")]]))
 
@@ -554,6 +632,7 @@ async def owner_del(call: CallbackQuery, state: FSMContext) -> None:
     if uid == call.from_user.id or not await db.remove_owner(uid):
         await call.answer("Этого владельца убрать нельзя.", show_alert=True)
         return
+    await _log(call, f"убрал владельца {uid}")
     await owners(call, state)
 
 
@@ -595,3 +674,248 @@ async def backup_now(call: CallbackQuery, bot: Bot) -> None:
         await call.message.answer(f"⚠️ Бэкап не удался: {esc(exc)}")
         return
     await call.message.answer("✅ Бэкап отправлен в хранилище.")
+
+
+# ---------- журнал действий ----------
+
+@router.callback_query(F.data == "a:log")
+async def journal(call: CallbackQuery) -> None:
+    items = await db.last_actions(20)
+    lines = [f"<code>{fmt_dt(x['at'])[:5]} {fmt_dt(x['at'])[11:]}</code> "
+             f"{esc(x['full_name'] or x['user_id'])}: {esc(x['text'])}" for x in items]
+    await show(call, "📜 <b>Журнал действий</b>\nПоследние 20 записей\n\n"
+                     + ("\n".join(lines) if lines else "Записей пока нет."),
+               kb([[("⬅️ Назад", "a:set")]]))
+
+
+# ---------- отчёт ----------
+
+REPORT_HOURS = (7, 8, 9, 10, 12, 18, 21, 23)
+
+
+@router.callback_query(F.data == "a:rep")
+async def report_menu(call: CallbackQuery) -> None:
+    on = await report.enabled()
+    current = await report.hour()
+    hours = [(("✅ " if h == current else "") + f"{h}:00", f"a:reph:{h}") for h in REPORT_HOURS]
+    await show(call, (
+        "📊 <b>Ежедневный отчёт</b>\n\n"
+        f"Состояние: {'включён' if on else 'выключен'}\n"
+        f"Время отправки: {current}:00 ({config.DISPLAY_TZ_LABEL})\n\n"
+        "Отчёт получают все владельцы бота. Текст отчёта меняется в разделе Оформление."
+    ), kb([
+        hours[:4], hours[4:],
+        [("⚪️ Выключить" if on else "🟢 Включить", "a:repon")],
+        [("📨 Прислать сейчас", "a:repnow")],
+        [("⬅️ Назад", "a:set")],
+    ]))
+
+
+@router.callback_query(F.data.startswith("a:reph:"))
+async def report_hour(call: CallbackQuery) -> None:
+    hour = _arg(call)
+    if 0 <= hour <= 23:
+        await db.set_setting("report_hour", str(hour))
+    await report_menu(call)
+
+
+@router.callback_query(F.data == "a:repon")
+async def report_toggle(call: CallbackQuery) -> None:
+    await db.set_setting("report_on", "0" if await report.enabled() else "1")
+    await report_menu(call)
+
+
+@router.callback_query(F.data == "a:repnow")
+async def report_now(call: CallbackQuery) -> None:
+    await call.answer()
+    # пробный показ: счётчики не обнуляются
+    await show(call.message, await report.build(), kb([[("⬅️ К отчёту", "a:rep")]]))
+
+
+# ---------- оформление ----------
+
+@router.callback_query(F.data == "a:lk")
+async def look_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await show(call, (
+        "🎨 <b>Оформление</b>\n\n"
+        "Здесь меняется то, что видят партнёры: тексты экранов, подписи, цвета и значки кнопок. "
+        "Здесь же шаблон ежедневного отчёта.\n\n"
+        "Премиум-эмодзи в текстах и на кнопках работают, если у аккаунта, на котором создан бот, "
+        "есть Telegram Premium."
+    ), kb([[("📝 Тексты", "a:lt"), ("🔘 Кнопки", "a:lb")], [("⬅️ Назад", "a:set")]]))
+
+
+@router.callback_query(F.data == "a:lt")
+async def look_texts(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    rows = [[(("✏️ " if look.is_custom_text(key) else "") + title, f"a:lt:{key}")]
+            for key, (title, _) in look.TEXTS.items()]
+    rows.append([("⬅️ Назад", "a:lk")])
+    await show(call, "📝 <b>Тексты</b>\n\nВыберите экран. Значком ✏️ отмечены изменённые.", kb(rows))
+
+
+def _key(call: CallbackQuery) -> str:
+    return call.data.split(":")[2]
+
+
+async def _text_card(target, key: str) -> None:
+    title = look.TEXTS[key][0]
+    marks = ", ".join("{" + p + "}" for p in look.placeholders(key)) or "нет"
+    await show(target, (
+        f"📝 <b>{esc(title)}</b>\n"
+        f"{'Изменён' if look.is_custom_text(key) else 'Стандартный'}\n"
+        f"Подстановки: <code>{marks}</code>\n\n"
+        "Так он выглядит сейчас (с примерными данными):\n"
+        "➖➖➖➖➖➖\n" + look.sample(key)
+    ), kb([
+        [("✏️ Изменить", f"a:lte:{key}")],
+        [("↩️ Вернуть стандартный", f"a:ltr:{key}")],
+        [("⬅️ К текстам", "a:lt")],
+    ]))
+
+
+@router.callback_query(F.data.startswith("a:lt:"))
+async def look_text_open(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if _key(call) in look.TEXTS:
+        await _text_card(call, _key(call))
+
+
+@router.callback_query(F.data.startswith("a:lte:"))
+async def look_text_edit(call: CallbackQuery, state: FSMContext) -> None:
+    key = _key(call)
+    if key not in look.TEXTS:
+        return
+    await state.set_state(A.look_text)
+    await state.set_data({"key": key})
+    marks = "\n".join("<code>{" + p + "}</code>" for p in look.placeholders(key)) or "нет"
+    await show(call, (
+        f"✏️ <b>{esc(look.TEXTS[key][0])}</b>\n\n"
+        "Пришлите новый текст одним сообщением. Жирный, курсив, ссылки и премиум-эмодзи сохранятся.\n\n"
+        f"Подстановки, которые бот заменит на данные:\n{marks}\n\n"
+        "Нажмите на подстановку, чтобы скопировать её."
+    ), kb([[("⬅️ Назад", f"a:lt:{key}")]]))
+
+
+@router.message(A.look_text)
+async def look_text_save(message: Message, state: FSMContext) -> None:
+    if not message.text or message.text.startswith("/"):
+        await message.answer("Нужен текст. Пришлите ещё раз.")
+        return
+    key = (await state.get_data())["key"]
+    await state.clear()
+    await look.set_text(key, message.html_text)
+    await _log(message, f"изменил текст: {look.TEXTS[key][0]}")
+    await _text_card(message, key)
+
+
+@router.callback_query(F.data.startswith("a:ltr:"))
+async def look_text_reset(call: CallbackQuery) -> None:
+    key = _key(call)
+    if key in look.TEXTS:
+        await look.set_text(key, None)
+        await _text_card(call, key)
+
+
+@router.callback_query(F.data == "a:lb")
+async def look_buttons(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    rows, row = [], []
+    for key in look.BUTTONS:
+        row.append((look.button(key)["text"], f"a:lb:{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([("⬅️ Назад", "a:lk")])
+    await show(call, "🔘 <b>Кнопки</b>\n\nВыберите кнопку, чтобы изменить подпись, цвет или значок.", kb(rows))
+
+
+async def _button_card(target, key: str) -> None:
+    view = look.button(key)
+    styles = [(("✅ " if view["style"] == code else "") + name.capitalize(), f"a:lbs:{key}:{code or 'none'}")
+              for code, name in look.STYLES.items()]
+    await show(target, (
+        "🔘 <b>Кнопка</b>\n\n"
+        f"Подпись: {esc(view['text'])}\n"
+        f"Цвет: {look.STYLES[view['style']]}\n"
+        f"Значок: {'премиум-эмодзи' if view['icon'] else 'нет'}\n\n"
+        "Верхняя кнопка показывает, как она выглядит у партнёров."
+    ), kb([
+        [look.btn(key, "a:noop")],
+        [("✏️ Подпись", f"a:lbe:{key}")],
+        styles[:2], styles[2:],
+        [("😀 Значок", f"a:lbi:{key}")] + ([("❌ Убрать значок", f"a:lbx:{key}")] if view["icon"] else []),
+        [("↩️ Вернуть стандартную", f"a:lbr:{key}")],
+        [("⬅️ К кнопкам", "a:lb")],
+    ]))
+
+
+@router.callback_query(F.data.startswith("a:lb:"))
+async def look_button_open(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if _key(call) in look.BUTTONS:
+        await _button_card(call, _key(call))
+
+
+@router.callback_query(F.data.startswith("a:lbs:"))
+async def look_button_style(call: CallbackQuery) -> None:
+    key, style = _key(call), call.data.split(":")[3]
+    if key in look.BUTTONS and (style == "none" or style in look.STYLES):
+        await look.set_button(key, style="" if style == "none" else style)
+        await _button_card(call, key)
+
+
+@router.callback_query(F.data.startswith("a:lbe:") | F.data.startswith("a:lbi:"))
+async def look_button_edit(call: CallbackQuery, state: FSMContext) -> None:
+    key = _key(call)
+    if key not in look.BUTTONS:
+        return
+    icon = call.data.startswith("a:lbi:")
+    await state.set_state(A.look_btn_icon if icon else A.look_btn_text)
+    await state.set_data({"key": key})
+    await show(call, (
+        "😀 Пришлите один премиум-эмодзи. Он встанет значком перед подписью кнопки.\n\n"
+        "Обычный эмодзи значком не станет: его можно просто вписать в подпись."
+        if icon else
+        "✏️ Пришлите новую подпись кнопки, до 30 символов. Обычные эмодзи можно писать прямо в подписи."
+    ), kb([[("⬅️ Назад", f"a:lb:{key}")]]))
+
+
+@router.message(A.look_btn_text)
+async def look_button_text_save(message: Message, state: FSMContext) -> None:
+    label = " ".join((message.text or "").split())
+    if not label or label.startswith("/") or len(label) > 30:
+        await message.answer("Подпись должна быть текстом до 30 символов. Пришлите ещё раз.")
+        return
+    key = (await state.get_data())["key"]
+    await state.clear()
+    await look.set_button(key, text=label)
+    await _log(message, f"изменил кнопку: {label}")
+    await _button_card(message, key)
+
+
+@router.message(A.look_btn_icon)
+async def look_button_icon_save(message: Message, state: FSMContext) -> None:
+    emoji_id = next((e.custom_emoji_id for e in (message.entities or []) if e.type == "custom_emoji"), None)
+    if not emoji_id:
+        await message.answer("В сообщении нет премиум-эмодзи. Пришлите один премиум-эмодзи.")
+        return
+    key = (await state.get_data())["key"]
+    await state.clear()
+    await look.set_button(key, icon=emoji_id)
+    await _button_card(message, key)
+
+
+@router.callback_query(F.data.startswith("a:lbx:") | F.data.startswith("a:lbr:"))
+async def look_button_reset(call: CallbackQuery) -> None:
+    key = _key(call)
+    if key not in look.BUTTONS:
+        return
+    if call.data.startswith("a:lbx:"):
+        await look.set_button(key, icon="")
+    else:
+        await look.reset_button(key)
+    await _button_card(call, key)

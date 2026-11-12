@@ -17,6 +17,10 @@ config.SEND_GAP_SECONDS = config.GROUP_GAP_SECONDS = 0
 config.CLICK_GAP_SECONDS = 0
 import db  # noqa: E402
 import admin  # noqa: E402
+import look  # noqa: E402
+import report  # noqa: E402
+import ui  # noqa: E402
+from aiogram.exceptions import TelegramBadRequest  # noqa: E402
 import cabinet  # noqa: E402
 import main as _main  # noqa: E402,F401  проверка, что точка входа импортируется
 import scheduler  # noqa: E402
@@ -84,6 +88,7 @@ class Msg(types.Message):
         self.from_user = User(uid)
         self.chat = type("Chat", (), {"id": uid, "type": chat_type})()
         self.text, self.caption, self.media_group_id, self.photo = text, caption, media_group_id, photo
+        self.html_text, self.entities = text, None
         self.video = self.animation = self.document = self.audio = self.voice = self.sticker = None
 
     async def answer(self, text, reply_markup=None):
@@ -300,6 +305,61 @@ async def main() -> None:
     assert "заморожен" in SCREEN[70][0]
     await admin.cabinet_freeze(Call(1, f"a:cfz:{cab}"), BOT)
 
+    # поиск: по части названия без учёта регистра, по ID человека, по названию рассылки
+    await admin.find(Call(1, "a:find"), st(1))
+    await admin.find_run(Msg(1, "ромаш"), st(1))
+    assert f"a:cab:{cab}" in buttons(1)
+    await admin.find_run(Msg(1, "70"), st(1))
+    assert f"a:cab:{cab}" in buttons(1)
+    await admin.find_run(Msg(1, "АКЦИЯ"), st(1))
+    assert f"a:p:{p1}" in buttons(1)
+    await admin.find_run(Msg(1, "нет такого"), st(1))
+    assert "ничего не найдено" in SCREEN[1][0]
+    await st(1).clear()
+
+    # оформление: владелец меняет текст и кнопку, партнёр видит изменения
+    await admin.look_text_edit(Call(1, "a:lte:home"), st(1))
+    await admin.look_text_save(Msg(1, "Добро пожаловать, {name}. Мест: {used}/{slots}"), st(1))
+    assert "Изменён" in SCREEN[1][0]
+    await cabinet.home(Msg(70, "/start"))
+    assert SCREEN[70][0] == "Добро пожаловать, Магазин Ромашка. Мест: 2/2"
+    await admin.look_button_edit(Call(1, "a:lbe:new"), st(1))
+    await admin.look_button_text_save(Msg(1, "Создать"), st(1))
+    await admin.look_button_style(Call(1, "a:lbs:new:success"))
+    icon_msg = Msg(1, "x")
+    icon_msg.entities = [type("E", (), {"type": "custom_emoji", "custom_emoji_id": "555"})()]
+    await admin.look_button_edit(Call(1, "a:lbi:new"), st(1))
+    await admin.look_button_icon_save(icon_msg, st(1))
+    await cabinet.home(Msg(70, "/start"))
+    first = SCREEN[70][1].inline_keyboard[0][0]
+    assert (first.text, first.style, first.icon_custom_emoji_id) == ("Создать", "success", "555")
+    await look.load()                                    # оформление переживает перезапуск
+    assert look.button("new") == {"text": "Создать", "style": "success", "icon": "555"}
+
+    # Telegram не принял цвет или значок: экран всё равно показан, с обычными кнопками
+    class Picky(Msg):
+        async def answer(self, text, reply_markup=None):
+            if any(b.style or b.icon_custom_emoji_id for row in reply_markup.inline_keyboard for b in row):
+                raise TelegramBadRequest("Bad Request: BUTTON_STYLE_INVALID")
+            await super().answer(text, reply_markup)
+    await cabinet.home(Picky(70, "/start"))
+    first = SCREEN[70][1].inline_keyboard[0][0]
+    assert first.text == "Создать" and first.style is None and first.callback_data == "c:new"
+
+    await admin.look_button_reset(Call(1, "a:lbr:new"))
+    await admin.look_text_reset(Call(1, "a:ltr:home"))
+    await cabinet.home(Msg(70, "/start"))
+    assert "Рассылок: 2 из 2" in SCREEN[70][0] and SCREEN[70][1].inline_keyboard[0][0].style is None
+
+    # отчёт и журнал
+    text = await report.build()
+    assert "Кабинетов: 2" in text and "Отправок" in text
+    BOT.sent.clear()
+    await report.send(BOT)
+    assert BOT.sent and BOT.sent[0][0] == 1 and await db.get_setting("cnt:sent") == "0"
+    await admin.journal(Call(1, "a:log"))
+    assert "создал кабинет Магазин Ромашка" in SCREEN[1][0] and "остановил рассылку" in SCREEN[1][0]
+
     # все экраны админки открываются
     for handler, data, extra in [
         (admin.cabinets, "a:cabs:0", (st(1),)), (admin.cabinet_open, f"a:cab:{cab}", (st(1),)),
@@ -313,11 +373,19 @@ async def main() -> None:
         (admin.announce, "a:bc", (st(1),)), (admin.cabinet_slots, f"a:csl:{cab}:1", ()),
         (admin.cabinet_all_groups, f"a:cag:{cab}", ()), (admin.cabinet_rename, f"a:crn:{cab}", (st(1),)),
         (admin.cabinet_delete_ask, f"a:cdel:{cab}", ()), (admin.menu_cb, "a:menu", (st(1),)),
+        (admin.settings, "a:set", (st(1),)), (admin.report_menu, "a:rep", ()),
+        (admin.report_hour, "a:reph:10", ()), (admin.report_toggle, "a:repon", ()),
+        (admin.report_now, "a:repnow", ()), (admin.look_menu, "a:lk", (st(1),)),
+        (admin.look_texts, "a:lt", (st(1),)), (admin.look_buttons, "a:lb", (st(1),)),
+        (admin.look_button_open, "a:lb:pause", (st(1),)), (admin.look_text_open, "a:lt:report", (st(1),)),
         (cabinet.help_, "c:help", ()), (cabinet.post_delete_ask, f"c:pd:{p1}", ()),
     ]:
         uid = 70 if data.startswith("c:") else 1
         await handler(Call(uid, data), *extra)
         assert SCREEN[uid][0], data
+    for key in look.TEXTS:                                # каждый текст открывается в редакторе
+        await admin.look_text_open(Call(1, f"a:lt:{key}"), st(1))
+        assert "{" not in SCREEN[1][0].split("➖➖➖➖➖➖")[1], key
     assert await db.global_interval() == 3 and (await db.get_group(g1))["interval_hours"] == 4
     assert (await db.get_group(g2))["is_public"] == 1
 

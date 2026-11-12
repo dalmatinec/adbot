@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message
 
 import config
 import db
+import look
 import notify
 import posts
 from ui import POST_ICON, POST_TEXT, esc, fmt_dt, fmt_hours, kb, person, show, times
@@ -39,12 +40,6 @@ async def _cabinet(user_id: int):
     return await db.get_cabinet(cid) if cid else None
 
 
-def _frozen_text(cabinet) -> str:
-    return (f"🏪 <b>{esc(cabinet['name'])}</b>\n\n"
-            "❄️ Кабинет заморожен администрацией. Рассылки приостановлены.\n"
-            "Для уточнения обратитесь к администрации.")
-
-
 # ---------- главный экран ----------
 
 async def home(target: Message | CallbackQuery) -> None:
@@ -57,22 +52,17 @@ async def home(target: Message | CallbackQuery) -> None:
         return
     rows = []
     if cabinet["status"] != "active":
-        text = _frozen_text(cabinet)
-        rows.append([("📋 Мои рассылки", "c:posts")])
+        text = look.text("frozen", name=esc(cabinet["name"]))
+        rows.append([look.btn("posts", "c:posts")])
     else:
         items = await db.list_posts(cabinet["id"])
         live = sum(1 for p in items if p["status"] == "active")
-        text = (
-            f"🏪 <b>{esc(cabinet['name'])}</b>\n\n"
-            f"📦 Рассылок: {len(items)} из {cabinet['slots']}\n"
-            f"🟢 Идёт сейчас: {live}\n"
-            f"⏱ Интервал: {fmt_hours(await db.global_interval())}\n\n"
-            "Выберите действие."
-        )
-        rows.append([("➕ Новая рассылка", "c:new")])
-        rows.append([("📋 Мои рассылки", "c:posts")])
-        rows.append([("👥 Доступ", "c:people")])
-        rows.append([("ℹ️ Как это работает", "c:help")])
+        text = look.text("home", name=esc(cabinet["name"]), used=len(items), slots=cabinet["slots"],
+                         live=live, interval=fmt_hours(await db.global_interval()))
+        rows.append([look.btn("new", "c:new")])
+        rows.append([look.btn("posts", "c:posts")])
+        rows.append([look.btn("people", "c:people")])
+        rows.append([look.btn("help", "c:help")])
     if db.is_owner(uid):
         rows.append([("⚙️ Админка", "a:menu")])
     await show(target, text, kb(rows))
@@ -130,16 +120,7 @@ async def home_cb(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "c:help")
 async def help_(call: CallbackQuery) -> None:
-    await show(call, (
-        "ℹ️ <b>Как это работает</b>\n\n"
-        "1. Нажмите <b>Новая рассылка</b> и задайте название.\n"
-        "2. Пришлите пост. Можно написать его здесь или переслать из канала, группы "
-        "или от другого бота.\n"
-        "3. Выберите группу, проверьте пост и подтвердите запуск.\n\n"
-        "Пост пересылается как есть, без изменений, с заданным интервалом.\n\n"
-        "В карточке рассылки доступны превью, замена поста, пауза и удаление.\n"
-        "Интервал и список групп задаёт администрация."
-    ), kb([[("⬅️ Назад", "c:home")]]))
+    await show(call, look.text("help"), kb([[look.btn("back", "c:home")]]))
 
 
 @router.callback_query(F.data == "c:people")
@@ -154,7 +135,7 @@ async def people(call: CallbackQuery) -> None:
     await show(call, (
         f"👥 <b>Доступ к кабинету</b>\n\n" + "\n".join(lines) +
         "\n\nИзменить состав может только администрация."
-    ), kb([[("⬅️ Назад", "c:home")]]))
+    ), kb([[look.btn("back", "c:home")]]))
 
 
 # ---------- новая рассылка и замена поста ----------
@@ -184,13 +165,7 @@ async def new_post(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer("Сейчас нет доступных групп. Обратитесь к администрации.", show_alert=True)
         return
     await state.set_state(S.new_name)
-    await show(call, (
-        "➕ <b>Новая рассылка</b>\n"
-        "Шаг 1 из 3. Название\n\n"
-        "Пришлите название рассылки, до 40 символов. По нему вы будете находить её в списке. "
-        "В группу название не попадает.\n\n"
-        "Для отмены нажмите Назад."
-    ), kb([[("⬅️ Назад", "c:home")]]))
+    await show(call, look.text("step1"), kb([[look.btn("back", "c:home")]]))
 
 
 @router.message(S.new_name)
@@ -201,13 +176,7 @@ async def new_name(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(S.post)
     await state.set_data({"mode": "new", "name": name})
-    await message.answer((
-        "➕ <b>Новая рассылка</b>\n"
-        "Шаг 2 из 3. Пост\n\n"
-        f"Название: {esc(name)}\n\n"
-        "Пришлите пост одним сообщением. Его можно написать здесь или переслать "
-        "из канала, группы или от бота. Пост будет пересылаться без изменений."
-    ), reply_markup=kb([[("✖️ Отмена", "c:home")]]))
+    await show(message, look.text("step2", title=esc(name)), kb([[look.btn("cancel", "c:home")]]))
 
 
 @router.callback_query(F.data.startswith("c:rep:"))
@@ -223,7 +192,7 @@ async def replace_start(call: CallbackQuery, state: FSMContext) -> None:
         f"🔄 <b>Замена поста в рассылке #{post['id']}</b>\n\n"
         "Пришлите новый пост одним сообщением. Группа, расписание и счётчик отправок сохранятся.\n\n"
         "Для отмены нажмите Назад."
-    ), kb([[("⬅️ Назад", f"c:p:{post['id']}")]]))
+    ), kb([[look.btn("back", f"c:p:{post['id']}")]]))
 
 
 @router.message(S.post)
@@ -280,8 +249,8 @@ async def got_post(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     await state.set_state(S.group)
     rows = [[(f"💬 {g['title'] or g['chat_id']}", f"c:g:{g['id']}")] for g in groups]
-    rows.append([("✖️ Отмена", "c:no")])
-    await message.answer("✅ Пост принят.\n\nВыберите группу для рассылки.", reply_markup=kb(rows))
+    rows.append([look.btn("cancel", "c:no")])
+    await show(message, look.text("choose"), kb(rows))
 
 
 @router.callback_query(F.data.startswith("c:g:"), S.group)
@@ -308,14 +277,9 @@ async def _confirm(message: Message, state: FSMContext, bot: Bot, group) -> None
     except Exception:
         log.warning("Не удалось показать превью перед запуском", exc_info=True)
     interval = await db.effective_interval(group["interval_hours"])
-    await message.answer((
-        "➕ <b>Новая рассылка</b>\n"
-        "Шаг 3 из 3. Подтверждение\n\n"
-        f"🏷 Название: {esc(data['name'])}\n"
-        f"💬 Группа: {esc(group['title'])}\n"
-        f"⏱ Интервал: {fmt_hours(interval)}\n\n"
-        "Выше показано, как пост будет выглядеть в группе. Запустить рассылку?"
-    ), reply_markup=kb([[("✅ Запустить", "c:ok")], [("✖️ Отмена", "c:no")]]))
+    await show(message, look.text("step3", title=esc(data["name"]), group=esc(group["title"]),
+                                  interval=fmt_hours(interval)),
+               kb([[look.btn("launch", "c:ok")], [look.btn("cancel", "c:no")]]))
 
 
 @router.callback_query(F.data == "c:no")
@@ -337,21 +301,17 @@ async def new_confirm(call: CallbackQuery, state: FSMContext) -> None:
     allowed = {g["id"]: g for g in await db.groups_for_cabinet(cabinet)}
     group = allowed.get(data.get("group_id"))
     if not group:
-        await show(call, "Эта группа сейчас недоступна. Начните заново.", kb([[("🏠 В кабинет", "c:home")]]))
+        await show(call, "Эта группа сейчас недоступна. Начните заново.", kb([[look.btn("home", "c:home")]]))
         return
     if await db.count_posts(cabinet["id"]) >= cabinet["slots"]:
-        await show(call, "Все места заняты, рассылка не создана.", kb([[("🏠 В кабинет", "c:home")]]))
+        await show(call, "Все места заняты, рассылка не создана.", kb([[look.btn("home", "c:home")]]))
         return
     post_id = await db.create_post(cabinet["id"], group["id"], call.from_user.id, data["name"],
                                    config.STORAGE_CHAT_ID, data["stored"], named=True)
     interval = await db.effective_interval(group["interval_hours"])
-    await show(call, (
-        f"✅ <b>Рассылка #{post_id} запущена</b>\n\n"
-        f"🏷 Название: {esc(data['name'])}\n"
-        f"💬 Группа: {esc(group['title'])}\n"
-        f"⏱ Интервал: {fmt_hours(interval)}\n\n"
-        "Первая отправка в течение минуты."
-    ), kb([[("📄 Открыть рассылку", f"c:p:{post_id}")], [("🏠 В кабинет", "c:home")]]))
+    await show(call, look.text("launched", id=post_id, title=esc(data["name"]), group=esc(group["title"]),
+                               interval=fmt_hours(interval)),
+               kb([[look.btn("open", f"c:p:{post_id}")], [look.btn("home", "c:home")]]))
 
 
 # ---------- мои рассылки ----------
@@ -364,9 +324,8 @@ async def posts_list(call: CallbackQuery, state: FSMContext) -> None:
         return
     items = await db.list_posts(cabinet["id"])
     rows = [[(f"{POST_ICON[p['status']]} #{p['id']} {p['title']}", f"c:p:{p['id']}")] for p in items]
-    rows.append([("⬅️ Назад", "c:home")])
-    text = (f"📋 <b>Мои рассылки</b>\n\nЗанято мест: {len(items)} из {cabinet['slots']}"
-            if items else "📋 <b>Мои рассылки</b>\n\nРассылок пока нет.")
+    rows.append([look.btn("back", "c:home")])
+    text = look.text("list", used=len(items), slots=cabinet["slots"])
     await show(call, text, kb(rows))
 
 
@@ -381,28 +340,23 @@ async def _own_post(call: CallbackQuery):
 async def post_text(post) -> str:
     interval = await db.effective_interval(post["group_interval"])
     nxt = fmt_dt(post["next_send_at"]) if post["status"] == "active" else "нет"
-    return (
-        f"📄 <b>Рассылка #{post['id']}</b>\n"
-        f"{esc(post['title'])}\n\n"
-        f"💬 Группа: {esc(post['group_title'])}\n"
-        f"{POST_ICON[post['status']]} Статус: {POST_TEXT[post['status']]}\n"
-        f"⏱ Интервал: {fmt_hours(interval)}\n\n"
-        f"📊 Отправлено: {times(post['sent_count'])}\n"
-        f"🕓 Последняя отправка: {fmt_dt(post['last_sent_at'])}\n"
-        f"⏭ Следующая отправка: {nxt}\n"
-        f"📅 Создана: {fmt_dt(post['created_at'])}"
-    )
+    return look.text(
+        "post", id=post["id"], title=esc(post["title"]), group=esc(post["group_title"]),
+        status=f"{POST_ICON[post['status']]} Статус: {POST_TEXT[post['status']]}",
+        interval=fmt_hours(interval), sent=times(post["sent_count"]), last=fmt_dt(post["last_sent_at"]),
+        next=nxt, created=fmt_dt(post["created_at"]))
 
 
 async def _post_card(target, post) -> None:
-    rows = [[("👁 Превью", f"c:pv:{post['id']}")], [("🔄 Заменить пост", f"c:rep:{post['id']}")]]
+    pid = post["id"]
+    rows = [[look.btn("preview", f"c:pv:{pid}")], [look.btn("replace", f"c:rep:{pid}")]]
     if post["status"] == "active":
-        rows.append([("⏸ Пауза", f"c:pt:{post['id']}")])
+        rows.append([look.btn("pause", f"c:pt:{pid}")])
     elif post["status"] == "paused":
-        rows.append([("▶️ Возобновить", f"c:pt:{post['id']}")])
-    rows.append([("✏️ Название", f"c:pn:{post['id']}")])
-    rows.append([("🗑 Удалить", f"c:pd:{post['id']}")])
-    rows.append([("⬅️ К списку", "c:posts")])
+        rows.append([look.btn("resume", f"c:pt:{pid}")])
+    rows.append([look.btn("rename", f"c:pn:{pid}")])
+    rows.append([look.btn("delete", f"c:pd:{pid}")])
+    rows.append([look.btn("to_list", "c:posts")])
     text = await post_text(post)
     if post["status"] == "stopped":
         text += "\n\nРассылка остановлена администрацией. Для возобновления свяжитесь с администрацией."
@@ -429,7 +383,7 @@ async def post_rename(call: CallbackQuery, state: FSMContext) -> None:
         f"Сейчас: {esc(post['title'])}\n\n"
         "Пришлите новое название, до 40 символов. Его видите только вы и администрация, "
         "в группу оно не попадает."
-    ), kb([[("⬅️ Назад", f"c:p:{post['id']}")]]))
+    ), kb([[look.btn("back", f"c:p:{post['id']}")]]))
 
 
 @router.message(S.name)
@@ -459,8 +413,7 @@ async def post_preview(call: CallbackQuery, bot: Bot) -> None:
     except Exception:
         await call.message.answer("⚠️ Не удалось показать пост. Попробуйте заменить его.")
         return
-    await call.message.answer(
-        "👆 Так пост выглядит в группе.", reply_markup=kb([[("⬅️ К рассылке", f"c:p:{post['id']}")]]))
+    await show(call.message, "👆 Так пост выглядит в группе.", kb([[look.btn("back", f"c:p:{post['id']}")]]))
 
 
 @router.callback_query(F.data.startswith("c:pt:"))
@@ -485,7 +438,7 @@ async def post_delete_ask(call: CallbackQuery) -> None:
     await show(call, (
         f"🗑 <b>Удалить рассылку #{post['id']}?</b>\n{esc(post['title'])}\n\n"
         "Рассылка остановится, место освободится. Отменить удаление нельзя."
-    ), kb([[("🗑 Да, удалить", f"c:pdc:{post['id']}")], [("⬅️ Отмена", f"c:p:{post['id']}")]]))
+    ), kb([[look.btn("confirm_delete", f"c:pdc:{post['id']}")], [look.btn("cancel", f"c:p:{post['id']}")]]))
 
 
 @router.callback_query(F.data.startswith("c:pdc:"))

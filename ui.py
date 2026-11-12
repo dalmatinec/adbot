@@ -17,18 +17,53 @@ POST_TEXT = {"active": "идёт", "paused": "на паузе", "stopped": "ос
 
 
 def kb(rows) -> InlineKeyboardMarkup:
-    """rows: список рядов, ряд: список (текст, data). data с http даёт
-    кнопку-ссылку, иначе callback_data."""
+    """rows: список рядов, ряд: список (текст, data) или (текст, data, вид).
+    data с http даёт кнопку-ссылку, иначе callback_data. Вид: словарь со
+    style (primary, success, danger) и icon (id премиум-эмодзи)."""
     out = []
     for row in rows:
         buttons = []
-        for text, data in row:
+        for item in row:
+            text, data = item[0], item[1]
+            extra = {}
+            if len(item) > 2:
+                if item[2].get("style"):
+                    extra["style"] = item[2]["style"]
+                if item[2].get("icon"):
+                    extra["icon_custom_emoji_id"] = item[2]["icon"]
             if data.startswith("http"):
-                buttons.append(InlineKeyboardButton(text=text, url=data))
+                buttons.append(InlineKeyboardButton(text=text, url=data, **extra))
             else:
-                buttons.append(InlineKeyboardButton(text=text, callback_data=data))
+                buttons.append(InlineKeyboardButton(text=text, callback_data=data, **extra))
         out.append(buttons)
     return InlineKeyboardMarkup(inline_keyboard=out)
+
+
+def _plain(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup | None:
+    """Та же клавиатура без цветов и значков. None, если их и не было."""
+    styled = False
+    rows = []
+    for row in markup.inline_keyboard:
+        out = []
+        for b in row:
+            if getattr(b, "style", None) or getattr(b, "icon_custom_emoji_id", None):
+                styled = True
+            out.append(InlineKeyboardButton(text=b.text, url=b.url) if getattr(b, "url", None)
+                       else InlineKeyboardButton(text=b.text, callback_data=b.callback_data))
+        rows.append(out)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if styled else None
+
+
+async def _send(method, text: str, markup) -> None:
+    """Если Telegram не принял цвет или значок кнопки (например, у владельца
+    бота нет Premium), экран всё равно показывается, просто с обычными кнопками."""
+    try:
+        await method(text, reply_markup=markup)
+    except TelegramBadRequest as exc:
+        plain = _plain(markup) if markup is not None else None
+        if plain is None or "not modified" in str(exc):
+            raise
+        await method(text, reply_markup=plain)
 
 
 async def show(target: Message | CallbackQuery, text: str, markup=None) -> None:
@@ -40,12 +75,12 @@ async def show(target: Message | CallbackQuery, text: str, markup=None) -> None:
         except TelegramBadRequest:
             pass
         try:
-            await target.message.edit_text(text, reply_markup=markup)
+            await _send(target.message.edit_text, text, markup)
         except TelegramBadRequest as exc:
             if "not modified" not in str(exc):
-                await target.message.answer(text, reply_markup=markup)
+                await _send(target.message.answer, text, markup)
     else:
-        await target.answer(text, reply_markup=markup)
+        await _send(target.answer, text, markup)
 
 
 def fmt_dt(iso_str: str | None) -> str:

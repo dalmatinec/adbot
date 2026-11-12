@@ -4,6 +4,8 @@ services:
     container_name: adbot
     restart: unless-stopped
     env_file: .env
+    # бот занимает около 80 МБ; предел не даёт ему повесить сервер при сбое
+    mem_limit: 300m
     volumes:
       - ./data:/app/data
     logging:

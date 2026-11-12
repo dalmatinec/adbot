@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- журнал действий владельцев бота
+CREATE TABLE IF NOT EXISTS actions (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    text    TEXT NOT NULL,
+    at      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_members_cabinet ON members(cabinet_id);
 CREATE INDEX IF NOT EXISTS idx_invites_cabinet ON invites(cabinet_id);
 CREATE INDEX IF NOT EXISTS idx_posts_cabinet   ON posts(cabinet_id);
@@ -148,6 +156,8 @@ async def insert(sql: str, params: tuple = ()) -> int:
 def _open(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # встроенный LOWER в SQLite не понимает кириллицу, для поиска нужен свой
+    conn.create_function("lower_u", 1, lambda s: s.lower() if isinstance(s, str) else s)
     return conn
 
 
@@ -227,6 +237,22 @@ async def set_setting(key: str, value: str) -> None:
     await execute(
         "INSERT INTO settings(key, value) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+async def settings_like(prefix: str) -> dict:
+    rows = await all_("SELECT key, value FROM settings WHERE key LIKE ?", (prefix + "%",))
+    return {r["key"]: r["value"] for r in rows}
+
+
+async def delete_setting(key: str) -> None:
+    await execute("DELETE FROM settings WHERE key=?", (key,))
+
+
+async def bump(key: str) -> None:
+    """Счётчик в настройках: +1 одним запросом."""
+    await execute(
+        "INSERT INTO settings(key, value) VALUES (?, '1') "
+        "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1", (key,))
 
 
 async def global_interval() -> int:
@@ -516,12 +542,14 @@ async def due_posts(limit: int = 40):
 
 
 async def mark_sent(post_id: int, interval_hours: int) -> None:
+    await bump("cnt:sent")
     await execute(
         "UPDATE posts SET last_sent_at=?, next_send_at=?, sent_count=sent_count+1, last_error=NULL WHERE id=?",
         (now(), in_seconds(interval_hours * 3600), post_id))
 
 
 async def mark_failed(post_id: int, error: str, retry_seconds: int = 600) -> None:
+    await bump("cnt:errors")
     await execute(
         "UPDATE posts SET error_count=error_count+1, last_error=?, next_send_at=? WHERE id=?",
         (error[:300], in_seconds(retry_seconds), post_id))
@@ -537,6 +565,46 @@ async def summary() -> dict:
         "(SELECT COUNT(*) FROM cabinets WHERE status='frozen') AS frozen, "
         "(SELECT COUNT(*) FROM posts) AS posts, "
         "(SELECT COUNT(*) FROM posts WHERE status='active') AS active, "
+        "(SELECT COUNT(*) FROM posts WHERE status='paused') AS paused, "
+        "(SELECT COUNT(*) FROM posts WHERE status='stopped') AS stopped, "
         "(SELECT COALESCE(SUM(sent_count), 0) FROM posts) AS sent, "
         "(SELECT COUNT(*) FROM groups WHERE is_active=1) AS groups")
     return dict(row)
+
+
+async def posts_with_errors(limit: int = 10):
+    return await all_(_POST + "WHERE p.last_error IS NOT NULL ORDER BY p.id DESC LIMIT ?", (limit,))
+
+
+# ---------- поиск ----------
+
+async def search(query: str, limit: int = 10) -> tuple[list, list]:
+    """Ищет кабинеты (по названию, имени, юзернейму или ID человека) и рассылки
+    (по названию или номеру). Регистр не важен."""
+    q = query.strip().lstrip("@#").lower()
+    like = f"%{q}%"
+    num = int(q) if q.isdigit() else -1
+    cabinets = await all_(
+        "SELECT DISTINCT c.* FROM cabinets c LEFT JOIN members m ON m.cabinet_id=c.id "
+        "LEFT JOIN users u ON u.user_id=m.user_id "
+        "WHERE lower_u(c.name) LIKE ? OR lower_u(u.full_name) LIKE ? OR lower_u(u.username) LIKE ? "
+        "OR m.user_id=? OR c.id=? ORDER BY c.id DESC LIMIT ?", (like, like, like, num, num, limit))
+    found = await all_(
+        _POST + "WHERE lower_u(p.title) LIKE ? OR p.id=? ORDER BY p.id DESC LIMIT ?", (like, num, limit))
+    return cabinets, found
+
+
+# ---------- журнал действий ----------
+
+async def log_action(user_id: int, text: str) -> None:
+    await execute("INSERT INTO actions(user_id, text, at) VALUES (?, ?, ?)", (user_id, text[:200], now()))
+
+
+async def last_actions(limit: int = 20):
+    return await all_(
+        "SELECT a.*, u.full_name FROM actions a LEFT JOIN users u ON u.user_id=a.user_id "
+        "ORDER BY a.id DESC LIMIT ?", (limit,))
+
+
+async def trim_actions(keep: int = 500) -> None:
+    await execute("DELETE FROM actions WHERE id <= (SELECT MAX(id) FROM actions) - ?", (keep,))
