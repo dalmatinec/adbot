@@ -30,7 +30,7 @@ DEFAULT_SLOTS = 3                 # постов на кабинет по умо
 MAX_SLOTS = 10                    # потолок слотов
 DEFAULT_INTERVAL_HOURS = int(os.getenv("DEFAULT_INTERVAL_HOURS", "2"))
 INTERVAL_CHOICES = (1, 2, 3, 4, 6, 8, 12, 24)   # часы, кнопки в админке
-INVITE_TTL_HOURS = int(os.getenv("INVITE_TTL_HOURS", "48"))
+INVITE_TTL_HOURS = int(os.getenv("INVITE_TTL_HOURS", "24"))
 
 # Антифлуд рассылки: пауза между любыми двумя отправками и между постами
 # в одну и ту же группу.

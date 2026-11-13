@@ -35,6 +35,8 @@ class A(StatesGroup):
     cabinet_name = State()
     group_id = State()
     rename = State()
+    note = State()
+    cabinet_msg = State()
     owner_id = State()
     announce = State()
     search = State()
@@ -220,8 +222,8 @@ async def _cabinet_card(target, cabinet_id: int) -> None:
         + (" (ссылка выдана)" if "helper" in invites else "") + "\n\n"
         f"📦 Рассылок: {used} из {c['slots']}\n"
         f"💬 Группы: {'все, включая скрытые' if c['all_groups'] else 'только открытые'}\n"
-        f"📅 Создан: {fmt_dt(c['created_at'])}\n\n"
-        "Владелец: выдать ссылку или сменить человека. Помощник: ссылка второму человеку."
+        f"📅 Создан: {fmt_dt(c['created_at'])}"
+        + (f"\n\n📝 Заметка: {esc(c['note'])}" if c["note"] else "")
     )
     cid_ = c["id"]
     rows = [
@@ -230,6 +232,10 @@ async def _cabinet_card(target, cabinet_id: int) -> None:
     ]
     if helper:
         rows.append([("❌ Убрать помощника", f"a:crh:{cid_}")])
+    contact = [("📨 От бота", f"a:cmsg:{cid_}"), ("📝 Заметка", f"a:cnote:{cid_}")]
+    if owner and owner["username"]:
+        contact.insert(0, ("💬 Чат", f"https://t.me/{owner['username']}"))
+    rows.append(contact)
     rows += [
         [("➖ Место", f"a:csl:{cid_}:-1"), ("➕ Место", f"a:csl:{cid_}:1")],
         [("💬 Все группы" if c["all_groups"] else "💬 Открытые", f"a:cag:{cid_}"),
@@ -323,6 +329,68 @@ async def cabinet_rename_done(message: Message, state: FSMContext) -> None:
     await state.clear()
     await db.rename_cabinet(cid, name)
     await _cabinet_card(message, cid)
+
+
+@router.callback_query(F.data.startswith("a:cnote:"))
+async def cabinet_note(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(A.note)
+    await state.set_data({"cid": _arg(call)})
+    await show(call, (
+        "📝 <b>Заметка к кабинету</b>\n\n"
+        "Пришлите текст до 300 символов: контакт, условия, договорённости. "
+        "Заметку видят только владельцы бота.\n\n"
+        "Чтобы удалить заметку, пришлите минус: -"
+    ), kb([[("⬅️ Назад", f"a:cab:{_arg(call)}")]]))
+
+
+@router.message(A.note)
+async def cabinet_note_done(message: Message, state: FSMContext) -> None:
+    note = (message.text or "").strip()
+    if not note or note.startswith("/") or len(note) > 300:
+        await message.answer("Заметка должна быть текстом до 300 символов. Пришлите ещё раз.")
+        return
+    cid = (await state.get_data())["cid"]
+    await state.clear()
+    await db.set_cabinet_note(cid, None if note == "-" else note)
+    await _cabinet_card(message, cid)
+
+
+@router.callback_query(F.data.startswith("a:cmsg:"))
+async def cabinet_message(call: CallbackQuery, state: FSMContext) -> None:
+    cid = _arg(call)
+    if not await db.cabinet_members(cid):
+        await call.answer("В кабинет ещё никто не вошёл.", show_alert=True)
+        return
+    await state.set_state(A.cabinet_msg)
+    await state.set_data({"cid": cid})
+    await show(call, (
+        "📨 <b>Сообщение от бота</b>\n\n"
+        "Пришлите сообщение. Бот передаст его владельцу кабинета и помощнику "
+        "с пометкой, что оно от администрации."
+    ), kb([[("⬅️ Назад", f"a:cab:{cid}")]]))
+
+
+@router.message(A.cabinet_msg)
+async def cabinet_message_send(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.text and message.text.startswith("/"):
+        return
+    cid = (await state.get_data())["cid"]
+    await state.clear()
+    cabinet = await db.get_cabinet(cid)
+    ok = 0
+    members = await db.cabinet_members(cid)
+    for m in members:
+        try:
+            await bot.send_message(m["user_id"], "✉️ <b>Сообщение от администрации</b>")
+            await bot.copy_message(chat_id=m["user_id"], from_chat_id=message.chat.id,
+                                   message_id=message.message_id)
+            ok += 1
+        except Exception:
+            pass
+    if cabinet:
+        await _log(message, f"написал в кабинет {cabinet['name']}")
+    await message.answer(f"✅ Доставлено: {ok} из {len(members)}.",
+                         reply_markup=kb([[("⬅️ К кабинету", f"a:cab:{cid}")]]))
 
 
 @router.callback_query(F.data.startswith("a:cdel:"))

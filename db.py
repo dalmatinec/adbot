@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS cabinets (
     slots      INTEGER NOT NULL DEFAULT 3,
     status     TEXT NOT NULL DEFAULT 'active',   -- active | frozen
     all_groups INTEGER NOT NULL DEFAULT 0,       -- видит и скрытые группы
+    note       TEXT,                             -- заметка владельцев бота
     created_at TEXT NOT NULL
 );
 
@@ -186,6 +187,8 @@ async def init(path: str | None = None) -> None:
     columns = {r["name"] for r in _conn.execute("PRAGMA table_info(posts)")}
     if "named" not in columns:   # база, созданная до появления названий
         _conn.execute("ALTER TABLE posts ADD COLUMN named INTEGER NOT NULL DEFAULT 0")
+    if "note" not in {r["name"] for r in _conn.execute("PRAGMA table_info(cabinets)")}:
+        _conn.execute("ALTER TABLE cabinets ADD COLUMN note TEXT")
     for uid in config.OWNER_IDS:
         _conn.execute("INSERT OR IGNORE INTO owners(user_id, added_at) VALUES (?, ?)", (uid, now()))
     _conn.commit()
@@ -378,6 +381,10 @@ async def count_cabinets() -> int:
 
 async def rename_cabinet(cabinet_id: int, name: str) -> None:
     await execute("UPDATE cabinets SET name=? WHERE id=?", (name, cabinet_id))
+
+
+async def set_cabinet_note(cabinet_id: int, note: str | None) -> None:
+    await execute("UPDATE cabinets SET note=? WHERE id=?", (note, cabinet_id))
 
 
 async def set_cabinet_status(cabinet_id: int, status: str) -> None:

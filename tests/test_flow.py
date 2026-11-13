@@ -372,6 +372,18 @@ async def main() -> None:
     await admin.journal(Call(1, "a:log"))
     assert "создал кабинет Магазин Ромашка" in SCREEN[1][0] and "остановил рассылку" in SCREEN[1][0]
 
+    # заметка и сообщение от бота в кабинет
+    await admin.cabinet_note(Call(1, f"a:cnote:{cab}"), st(1))
+    await admin.cabinet_note_done(Msg(1, "Оплата до 20 числа"), st(1))
+    assert "Оплата до 20 числа" in SCREEN[1][0] and "https://t.me/user70" in buttons(1)
+    BOT.sent.clear()
+    await admin.cabinet_message(Call(1, f"a:cmsg:{cab}"), st(1))
+    await admin.cabinet_message_send(Msg(1, "Проверьте пост"), st(1), BOT)
+    assert {uid for uid, _ in BOT.sent} == {70, 51} and "2 из 2" in SCREEN[1][0]
+    await admin.cabinet_note(Call(1, f"a:cnote:{cab}"), st(1))
+    await admin.cabinet_note_done(Msg(1, "-"), st(1))
+    assert "Заметка" not in SCREEN[1][0].split("Создан")[1]
+
     # группы добавляются по ID с проверкой прав бота
     await admin.group_new(Call(1, "a:gnew"), st(1))
     for bad, why in ((-1, "не видит"), (-1008, "не администратор"), (-1007, "не группа"), (-100999, "хранилище")):
