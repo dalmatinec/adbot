@@ -223,14 +223,19 @@ async def _cabinet_card(target, cabinet_id: int) -> None:
         f"📅 Создан: {fmt_dt(c['created_at'])}\n\n"
         "Владелец: выдать ссылку или сменить человека. Помощник: ссылка второму человеку."
     )
+    cid_ = c["id"]
     rows = [
-        [("📄 Рассылки", f"a:cps:{c['id']}"), ("🔁 Владелец" if owner else "🔗 Владелец", f"a:clo:{c['id']}")],
-        [("🤝 Помощник", f"a:clh:{c['id']}")] + ([("❌ Убрать", f"a:crh:{c['id']}")] if helper else []),
-        [("➖ Место", f"a:csl:{c['id']}:-1"), ("➕ Место", f"a:csl:{c['id']}:1")],
-        [("💬 Группы: " + ("все" if c["all_groups"] else "открытые"), f"a:cag:{c['id']}")],
-        [("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{c['id']}"),
-         ("✏️ Имя", f"a:crn:{c['id']}")],
-        [("🗑 Удалить", f"a:cdel:{c['id']}"), ("⬅️ К списку", "a:cabs:0")],
+        [(f"📄 Рассылки ({used})", f"a:cps:{cid_}")],
+        [("🔁 Владелец" if owner else "🔗 Владелец", f"a:clo:{cid_}"), ("🤝 Помощник", f"a:clh:{cid_}")],
+    ]
+    if helper:
+        rows.append([("❌ Убрать помощника", f"a:crh:{cid_}")])
+    rows += [
+        [("➖ Место", f"a:csl:{cid_}:-1"), ("➕ Место", f"a:csl:{cid_}:1")],
+        [("💬 Все группы" if c["all_groups"] else "💬 Открытые", f"a:cag:{cid_}"),
+         ("▶️ Разморозить" if c["status"] != "active" else "❄️ Заморозить", f"a:cfz:{cid_}")],
+        [("✏️ Имя", f"a:crn:{cid_}"), ("🗑 Удалить", f"a:cdel:{cid_}")],
+        [("⬅️ К списку", "a:cabs:0")],
     ]
     await show(target, text, kb(rows))
 
