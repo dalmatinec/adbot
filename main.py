@@ -39,6 +39,29 @@ async def set_commands(bot: Bot) -> None:
         logging.warning("Не удалось задать меню команд", exc_info=True)
 
 
+async def check_storage(bot: Bot) -> None:
+    """Хранилище должно быть супергруппой или каналом. В обычной группе номера
+    сообщений у каждого бота свои, и после замены бота посты оттуда не достать."""
+    import notify
+    try:
+        chat = await bot.get_chat(config.STORAGE_CHAT_ID)
+    except Exception as exc:
+        logging.error("Хранилище %s недоступно: %s", config.STORAGE_CHAT_ID, exc)
+        await notify.owners(
+            bot, f"⚠️ Бот не видит хранилище постов <code>{config.STORAGE_CHAT_ID}</code>.\n"
+                 "Добавьте его туда администратором и проверьте STORAGE_CHAT_ID. "
+                 "Пока это не исправлено, посты не принимаются и рассылки не идут.")
+        return
+    if chat.type == "group":
+        logging.warning("Хранилище %s: обычная группа, посты не переживут замену бота", config.STORAGE_CHAT_ID)
+        await notify.owners(
+            bot, "⚠️ <b>Хранилище постов ненадёжно</b>\n\n"
+                 "Сейчас это обычная группа. В таких группах у каждого бота свои номера сообщений, "
+                 "поэтому после замены бота сохранённые посты станут недоступны.\n\n"
+                 "Создайте приватный канал, добавьте бота администратором и укажите ID канала "
+                 "в STORAGE_CHAT_ID. Посты действующих рассылок после этого нужно заменить.")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
@@ -59,6 +82,7 @@ async def main() -> None:
     me = await bot.get_me()
     logging.info("Бот запущен: @%s", me.username)
     await set_commands(bot)
+    await check_storage(bot)
 
     background = [
         asyncio.create_task(run_scheduler(bot), name="scheduler"),

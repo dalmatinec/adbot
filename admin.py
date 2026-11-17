@@ -17,7 +17,7 @@ import look
 import notify
 import posts
 import report
-from cabinet import post_text
+from cabinet import collect_ids, post_text
 from ui import POST_ICON, esc, fmt_dt, fmt_hours, kb, person, show
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ class A(StatesGroup):
     rename = State()
     note = State()
     cabinet_msg = State()
+    post_replace = State()
     owner_id = State()
     announce = State()
     search = State()
@@ -449,9 +450,9 @@ async def _admin_post_card(target, post) -> None:
         text += f"\n⚠️ Последняя ошибка: {esc(post['last_error'])}"
     pid = post["id"]
     await show(target, text, kb([
-        [("👁 Превью", f"a:pv:{pid}")],
-        [("▶️ Возобновить" if post["status"] == "stopped" else "⏹ Остановить", f"a:pst:{pid}")],
-        [("🗑 Удалить", f"a:pdel:{pid}")],
+        [("👁 Превью", f"a:pv:{pid}"), ("🔄 Заменить пост", f"a:prep:{pid}")],
+        [("▶️ Возобновить" if post["status"] == "stopped" else "⏹ Остановить", f"a:pst:{pid}"),
+         ("🗑 Удалить", f"a:pdel:{pid}")],
         [("⬅️ К рассылкам кабинета", f"a:cps:{post['cabinet_id']}")],
         [("🏪 К кабинету", f"a:cab:{post['cabinet_id']}")],
     ]))
@@ -484,6 +485,49 @@ async def post_preview(call: CallbackQuery, bot: Bot) -> None:
         return
     await call.message.answer("👆 Так пост выглядит в группе.",
                               reply_markup=kb([[("⬅️ К рассылке", f"a:p:{post['id']}")]]))
+
+
+@router.callback_query(F.data.startswith("a:prep:"))
+async def post_replace(call: CallbackQuery, state: FSMContext) -> None:
+    post = await _post(call)
+    if not post:
+        return
+    await state.set_state(A.post_replace)
+    await state.set_data({"post_id": post["id"]})
+    await show(call, (
+        f"🔄 <b>Замена поста в рассылке #{post['id']}</b>\n"
+        f"{esc(post['title'])}\n\n"
+        "Пришлите или перешлите сюда пост. Так же восстанавливается пост, который пропал: "
+        "перешлите его из старого хранилища.\n\n"
+        "Название, группа, расписание и счётчик сохранятся."
+    ), kb([[("⬅️ Назад", f"a:p:{post['id']}")]]))
+
+
+@router.message(A.post_replace)
+async def post_replace_done(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.text and message.text.startswith("/"):
+        return
+    ids = await collect_ids(message)
+    if ids is None or await state.get_state() != A.post_replace.state:
+        return
+    data = await state.get_data()
+    try:
+        stored = await posts.store(bot, message.chat.id, ids)
+    except posts.IngestError as exc:
+        await message.answer(f"⚠️ {esc(exc)}\n<code>{esc(getattr(exc, 'reason', ''))}</code>")
+        return
+    await state.clear()
+    post = await db.get_post(data["post_id"])
+    if not post:
+        await message.answer("Рассылка не найдена.")
+        return
+    await db.replace_post_content(post["id"], posts.post_title(message), config.STORAGE_CHAT_ID, stored)
+    if post["status"] == "paused" and post["last_error"]:
+        await db.set_post_status(post["id"], "active")
+    await posts.drop_stored(bot, post["storage_chat_id"], posts.ids_of(post))
+    await _log(message, f"заменил пост в рассылке #{post['id']} ({post['cabinet_name']})")
+    await message.answer("✅ Пост заменён, рассылка продолжается.")
+    await _admin_post_card(message, await db.get_post(post["id"]))
 
 
 @router.callback_query(F.data.startswith("a:pst:"))

@@ -372,6 +372,14 @@ async def main() -> None:
     await admin.journal(Call(1, "a:log"))
     assert "создал кабинет Магазин Ромашка" in SCREEN[1][0] and "остановил рассылку" in SCREEN[1][0]
 
+    # владелец восстанавливает пропавший пост: рассылка снова идёт
+    await db.mark_failed(p1, "message to forward not found")
+    await db.set_post_status(p1, "paused")
+    await admin.post_replace(Call(1, f"a:prep:{p1}"), st(1))
+    await admin.post_replace_done(Msg(1, "Восстановленный пост"), st(1), BOT)
+    post = await db.get_post(p1)
+    assert post["status"] == "active" and post["last_error"] is None and post["title"] == "Акция ноября"
+
     # заметка и сообщение от бота в кабинет
     await admin.cabinet_note(Call(1, f"a:cnote:{cab}"), st(1))
     await admin.cabinet_note_done(Msg(1, "Оплата до 20 числа"), st(1))

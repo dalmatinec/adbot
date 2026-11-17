@@ -194,20 +194,28 @@ async def replace_start(call: CallbackQuery, state: FSMContext) -> None:
     ), kb([[look.btn("back", f"c:p:{post['id']}")]]))
 
 
+async def collect_ids(message: Message) -> list[int] | None:
+    """id сообщений поста. Альбом приходит несколькими сообщениями: первое ждёт
+    остальные и возвращает все id, для остальных возвращается None."""
+    ids = [message.message_id]
+    if message.media_group_id:
+        key = (message.from_user.id, message.media_group_id)
+        if key in _albums:
+            _albums[key].append(message.message_id)
+            return None
+        _albums[key] = ids
+        await asyncio.sleep(ALBUM_WAIT_SECONDS)
+        ids = _albums.pop(key, ids)
+    return ids
+
+
 @router.message(S.post)
 async def got_post(message: Message, state: FSMContext, bot: Bot) -> None:
     if message.text and message.text.startswith("/"):
         return
-    ids = [message.message_id]
-    if message.media_group_id:
-        # альбом приходит несколькими сообщениями: собираем их и принимаем разом
-        key = (message.from_user.id, message.media_group_id)
-        if key in _albums:
-            _albums[key].append(message.message_id)
-            return
-        _albums[key] = ids
-        await asyncio.sleep(ALBUM_WAIT_SECONDS)
-        ids = _albums.pop(key, ids)
+    ids = await collect_ids(message)
+    if ids is None:
+        return
     cabinet = await _cabinet(message.from_user.id)
     data = await state.get_data()
     if not cabinet or cabinet["status"] != "active" or await state.get_state() != S.post.state:
@@ -232,6 +240,8 @@ async def got_post(message: Message, state: FSMContext, bot: Bot) -> None:
             await message.answer("Рассылка не найдена.")
             return
         await db.replace_post_content(post["id"], title, config.STORAGE_CHAT_ID, stored)
+        if post["status"] == "paused" and post["last_error"]:
+            await db.set_post_status(post["id"], "active")   # пауза была из-за пропавшего поста
         await posts.drop_stored(bot, post["storage_chat_id"], posts.ids_of(post))
         await message.answer("✅ Пост заменён. Расписание сохранено.")
         await _post_card(message, await db.get_post(post["id"]))
